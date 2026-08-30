@@ -22,7 +22,7 @@ TransDub AI เป็นเว็บแอปบน Windows สำหรับ�
 
 โมเดล JaiTTS, Demucs checkpoint และ voice profiles เดิมถูกนำมาไว้ในโปรเจกต์นี้แล้ว สคริปต์ setup จะนำข้อมูลโปรไฟล์ “พอตแคส” และ “พี่นิว” เข้า SQLite ใหม่โดยไม่ย้ายประวัติงานเก่า
 
-บน GitHub ไฟล์โมเดล JaiTTS ขนาดใหญ่ถูกแนบไว้เป็น release asset แยกจาก source code ให้ดาวน์โหลด `JaiTTS-F5TTS-model.pt` จาก release ล่าสุดแล้ววางไว้ที่ `models/JaiTTS-F5TTS/model.pt` ก่อนรัน setup หาก clone จาก source ที่ไม่มีไฟล์โมเดล
+บน GitHub ไฟล์โมเดล JaiTTS ขนาดใหญ่ถูกแนบไว้เป็น release asset แยกจาก source code ให้ดาวน์โหลด `model.pt` จาก release ล่าสุดแล้ววางไว้ที่ `models/JaiTTS-F5TTS/model.pt` ก่อนรัน setup หาก clone จาก source ที่ไม่มีไฟล์โมเดล
 
 ## การทำงานและไฟล์
 
