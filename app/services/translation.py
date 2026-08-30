@@ -21,9 +21,11 @@ DEFAULT_TRANSLATION_PROMPT = """คุณเป็นนักแปลซับ
 
 กฎสำคัญ:
 - ใช้ภาษาไทยแบบภาษาพูดที่เป็นธรรมชาติและสม่ำเสมอ
-- รวม/แบ่ง cue ได้ตามความหมาย แต่ห้ามสร้างเวลาซ้อน ย้อน หรือออกนอกช่วง TARGET
+- ต้องแปลทุก cue ใน TARGET แม้ cue นั้นจะสั้นมาก ห้ามข้ามหรือรวมจนเนื้อหาหาย
+- พยายามใช้ start/end เดิมของแต่ละ cue; หากรวม cue ให้ช่วงเวลาครอบคลุม cue ต้นฉบับทุกตัวที่รวม
+- ห้ามสร้างเวลาซ้อน ย้อน หรือออกนอกช่วง TARGET
 - ห้ามทิ้งเศษประโยคหรือคำเชื่อมไว้เป็น cue เดี่ยว
-- ผลลัพธ์ต้องไม่มีอักษรอังกฤษ A-Z/a-z; ชื่อเฉพาะและ identifier ให้ถอดเสียงเป็นไทย
+- ชื่อเฉพาะและ identifier ให้ถอดเสียงเป็นไทย หากเป็นคำอังกฤษสั้น ๆ ที่อยู่เดี่ยว ๆ ให้แปลงเป็นคำอ่านไทย
 - ตัวเลข ตัวย่อ สัญลักษณ์ และหน่วยต้องอยู่ในรูปที่ TTS ไทยอ่านได้
 - ส่งกลับเฉพาะ SRT ห้ามมี code block หรือคำอธิบาย"""
 
@@ -31,12 +33,41 @@ TIME_RE = re.compile(
     r"^(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
     r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})(?:\s+.*)?$"
 )
-LATIN_RE = re.compile(r"[A-Za-z]")
+# JaiTTS can speak Latin characters embedded in a Thai sentence only when the
+# user has deliberately supplied a glossary.  A bare English token, however,
+# is almost always read incorrectly.  This mirrors the validator used by the
+# original translator project and avoids rejecting otherwise valid Thai cues
+# that contain a product or proper name in context.
+STANDALONE_LATIN_RE = re.compile(
+    r'''^[\s"'([{]*[A-Za-z][A-Za-z0-9#_.+\-]{0,20}[.!?]?[\s"')\]}]*$'''
+)
+LATIN_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z][A-Za-z0-9#_.+\-']*(?![A-Za-z])")
+UNSAFE_LATIN_TOKENS = {
+    "ai",
+    "api",
+    "cpu",
+    "gpu",
+    "mp3",
+    "mp4",
+    "obs",
+    "srt",
+    "tts",
+    "wav",
+}
 MARKUP_RE = re.compile(r"</?[a-z][^>]*>|\{\\[^}]+\}|```", re.I)
+THAI_FRAGMENT_TEXT = {"และ", "แต่", "หรือ", "เพราะว่า", "ซึ่ง", "ดังนั้น", "ถ้า", "เมื่อ"}
+
+ALIGNMENT_TOLERANCE_MS = 700
+SHORT_CUE_ALIGNMENT_MS = 1_000
+MIN_SPLIT_CUES = 2
 
 
 class TranslationError(RuntimeError):
     pass
+
+
+class ChunkValidationError(TranslationError):
+    """All models answered, but their subtitle output failed validation."""
 
 
 @dataclass(slots=True)
@@ -139,6 +170,51 @@ def build_chunks(job_id: str, cues: list[dict]) -> list[Chunk]:
     return chunks
 
 
+def _reindex_chunks(chunks: list[Chunk]) -> None:
+    for index, chunk in enumerate(chunks):
+        chunk.index = index
+
+
+def split_chunk(chunk: Chunk, source: list[dict]) -> tuple[Chunk, Chunk] | None:
+    """Split a failed translation request at a natural source-cue boundary.
+
+    Gemini occasionally omits short cues when a request is very large.  The
+    worker must be able to retry the same work at a smaller granularity without
+    changing source order or losing the surrounding context.  A sentence/gap
+    boundary is preferred; a midpoint is used as a deterministic last resort.
+    """
+    if chunk.target_end - chunk.target_start + 1 < MIN_SPLIT_CUES:
+        return None
+
+    middle = (chunk.target_start + chunk.target_end) // 2
+    boundary: int | None = None
+    max_distance = min(20, (chunk.target_end - chunk.target_start) // 2)
+    for distance in range(max_distance + 1):
+        candidates = [middle - distance]
+        if distance:
+            candidates.append(middle + distance)
+        for candidate in candidates:
+            if chunk.target_start <= candidate < chunk.target_end and _safe_boundary(source, candidate):
+                boundary = candidate
+                break
+        if boundary is not None:
+            break
+    if boundary is None:
+        boundary = middle
+
+    def child(suffix: str, start: int, end: int) -> Chunk:
+        return Chunk(
+            id=f"{chunk.id}-{suffix}",
+            index=chunk.index,
+            target_start=start,
+            target_end=end,
+            context_start=max(0, start - 4),
+            context_end=min(len(source) - 1, end + 4),
+        )
+
+    return child("a", chunk.target_start, boundary), child("b", boundary + 1, chunk.target_end)
+
+
 def _render(cues: list[dict], start: int, end: int) -> str:
     if start > end:
         return "(ไม่มี)"
@@ -172,6 +248,42 @@ def _request(cues: list[dict], chunk: Chunk, source_language: str, errors: list[
     return system, contents, min(32_768, max(4_096, int(target_chars * 1.2)))
 
 
+def _interval_gap(left: dict, right: dict) -> int:
+    """Return the distance between two intervals, or zero when they overlap."""
+    if int(left["end_ms"]) <= int(right["start_ms"]):
+        return int(right["start_ms"]) - int(left["end_ms"])
+    if int(right["end_ms"]) <= int(left["start_ms"]):
+        return int(left["start_ms"]) - int(right["end_ms"])
+    return 0
+
+
+def _alignment_limit(source_cue: dict) -> int:
+    """Allow a little more drift for the short cues models tend to absorb."""
+    duration = int(source_cue["end_ms"]) - int(source_cue["start_ms"])
+    return SHORT_CUE_ALIGNMENT_MS if duration <= 1_200 else ALIGNMENT_TOLERANCE_MS // 2
+
+
+def _can_fallback_align(source_cue: dict, gap: int) -> bool:
+    """Do not hide a completely omitted long cue at an exact boundary."""
+    duration = int(source_cue["end_ms"]) - int(source_cue["start_ms"])
+    return gap <= _alignment_limit(source_cue) and (duration <= 1_200 or gap > 0)
+
+
+def _has_unsafe_latin(text: str) -> bool:
+    stripped = text.strip()
+    if STANDALONE_LATIN_RE.fullmatch(stripped):
+        return True
+    if LATIN_TOKEN_RE.search(stripped) and not re.search(r"[\u0E00-\u0E7F]", stripped):
+        return True
+    # Proper names such as “Whisper Flow” are useful in a Thai sentence and
+    # are handled by the voice glossary.  Short all-capital technical tokens
+    # (AI/API/MP4/…) are not reliably pronounced by JaiTTS without a glossary.
+    return any(
+        token.lower().rstrip("'") in UNSAFE_LATIN_TOKENS
+        for token in LATIN_TOKEN_RE.findall(text)
+    )
+
+
 def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dict], list[str]]:
     parsed = sorted(parse_model_srt(raw), key=lambda cue: (cue["start_ms"], cue["end_ms"]))
     normalized: list[dict] = []
@@ -191,23 +303,39 @@ def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dic
     results: list[dict] = []
     target = source[chunk.target_start : chunk.target_end + 1]
     for index, cue in enumerate(normalized, 1):
+        alignment_warnings: list[str] = []
         indexes = [
             item["position"]
             for item in target
             if item["start_ms"] < cue["end_ms"] and item["end_ms"] > cue["start_ms"]
         ]
+        if not indexes and target:
+            nearest = min(target, key=lambda item: _interval_gap(cue, item))
+            gap = _interval_gap(cue, nearest)
+            if _can_fallback_align(nearest, gap):
+                indexes = [nearest["position"]]
+                alignment_warnings.append(
+                    f"จับคู่ cue {index} กับ cue ต้นฉบับ {nearest['source_index']} "
+                    f"แม้เวลาเลื่อน {gap} ms"
+                )
+                warnings.append(alignment_warnings[-1])
         if cue["start_ms"] < range_start or cue["end_ms"] > range_end:
             errors.append(f"cue {index} ออกนอกช่วงต้นฉบับ")
         if not indexes:
             errors.append(f"cue {index} ไม่ตรงกับต้นฉบับ")
-        if LATIN_RE.search(cue["text"]):
+        if _has_unsafe_latin(cue["text"]):
             errors.append(f"cue {index} ยังมีอักษรอังกฤษ")
         if MARKUP_RE.search(cue["text"]):
             errors.append(f"cue {index} ยังมี markup")
+        if cue["text"].strip() in THAI_FRAGMENT_TEXT:
+            errors.append(f"cue {index} เป็นเศษประโยค")
         duration = max(1, cue["end_ms"] - cue["start_ms"])
         cue_warnings = []
         if len(re.sub(r"[\s\W]", "", cue["text"])) / (duration / 1000) > 15:
             cue_warnings.append("เร็วกว่า 15 อักขระต่อวินาที")
+        cue_warnings.extend(alignment_warnings)
+        if LATIN_TOKEN_RE.search(cue["text"]) and not _has_unsafe_latin(cue["text"]):
+            cue_warnings.append("มีชื่อเฉพาะ/คำละติน อาจต้องตรวจเสียงอ่าน")
         results.append(
             {
                 **cue,
@@ -217,6 +345,23 @@ def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dic
                 "translation_chunk_id": chunk.id,
             }
         )
+    covered = {position for result in results for position in result["source_cue_indexes"]}
+    for source_cue in target:
+        if source_cue["position"] in covered or not results:
+            continue
+        nearest_index, nearest_result = min(
+            enumerate(results), key=lambda item: _interval_gap(item[1], source_cue)
+        )
+        gap = _interval_gap(nearest_result, source_cue)
+        if _can_fallback_align(source_cue, gap):
+            nearest_result["source_cue_indexes"].append(source_cue["position"])
+            covered.add(source_cue["position"])
+            warning = (
+                f"จับคู่ cue ต้นฉบับ {source_cue['source_index']} กับ cue แปล {nearest_index + 1} "
+                f"ด้วย tolerance {gap} ms"
+            )
+            nearest_result["warnings"].append(warning)
+            warnings.append(warning)
     for cue in target:
         if not any(cue["position"] in result["source_cue_indexes"] for result in results):
             errors.append(f"cue ต้นฉบับ {cue['source_index']} ไม่ถูกครอบคลุม")
@@ -241,6 +386,14 @@ def _usage(metadata: Any) -> dict:
     }
 
 
+def _finish_reason(response: Any) -> str:
+    candidates = getattr(response, "candidates", None) or []
+    reason = getattr(response, "finish_reason", None)
+    if candidates:
+        reason = getattr(candidates[0], "finish_reason", reason)
+    return str(reason or "").upper()
+
+
 def available_models(client: Any) -> list[str]:
     try:
         names = {
@@ -253,106 +406,238 @@ def available_models(client: Any) -> list[str]:
         return list(TRANSLATION_MODELS)
 
 
+def _checkpoint_for(result_dir: Path, chunk: Chunk) -> Path | None:
+    """Find a checkpoint from the current format or the pre-split legacy format."""
+    current = result_dir / f"{chunk.id}.json"
+    if current.is_file():
+        return current
+    legacy = result_dir / f"{chunk.index:04d}.json"
+    return legacy if legacy.is_file() else None
+
+
+def _translation_plan(job_id: str, source: list[dict]) -> list[Chunk]:
+    """Resume a persisted split plan when the process was restarted mid-translation."""
+    existing = db.translation_chunks(job_id)
+    if existing and source:
+        ordered: list[Chunk] = []
+        for row in existing:
+            try:
+                ordered.append(
+                    Chunk(
+                        id=str(row["id"]),
+                        index=int(row["chunk_index"]),
+                        target_start=int(row["target_start"]),
+                        target_end=int(row["target_end"]),
+                        context_start=int(row["context_start"]),
+                        context_end=int(row["context_end"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                ordered = []
+                break
+        if ordered:
+            ordered.sort(key=lambda item: item.index)
+            covers_source = (
+                ordered[0].target_start == 0
+                and ordered[-1].target_end == len(source) - 1
+                and all(
+                    current.target_start == previous.target_end + 1
+                    for previous, current in zip(ordered, ordered[1:], strict=False)
+                )
+                and all(
+                    0 <= item.target_start <= item.target_end < len(source) for item in ordered
+                )
+            )
+            if covers_source:
+                _reindex_chunks(ordered)
+                return ordered
+    return build_chunks(job_id, source)
+
+
+def _translate_chunk(
+    *,
+    job_id: str,
+    source: list[dict],
+    chunk: Chunk,
+    source_language: str,
+    client: Any,
+    models: list[str],
+) -> tuple[list[dict], list[str], str]:
+    """Generate and validate one chunk, trying every configured model."""
+    last_error = "แปลไม่สำเร็จ"
+    had_validation_error = False
+    for model in models:
+        correction_errors: list[str] = []
+        for attempt in range(2):
+            system, contents, max_tokens = _request(
+                source, chunk, source_language, correction_errors
+            )
+            try:
+                level = types.ThinkingLevel.MINIMAL if "lite" in model else types.ThinkingLevel.LOW
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config={
+                        "system_instruction": system,
+                        "thinking_config": {"thinking_level": level},
+                        "max_output_tokens": max_tokens,
+                    },
+                )
+                usage = _usage(getattr(response, "usage_metadata", None))
+                db.record_api_usage(job_id, "translation", model, total_tokens=usage["total"])
+                if any(marker in _finish_reason(response) for marker in ("MAX_TOKENS", "LENGTH")):
+                    last_error = "ผลลัพธ์ถูกตัดเพราะยาวเกินไป"
+                    had_validation_error = True
+                    db.record_attempt(
+                        job_id,
+                        "translation",
+                        "invalid",
+                        unit_id=chunk.id,
+                        model=model,
+                        message=last_error,
+                        usage=usage,
+                    )
+                    raise ChunkValidationError(last_error)
+            except ChunkValidationError:
+                raise
+            except Exception as exc:
+                text = str(exc)
+                last_error = text[-1_200:]
+                db.record_attempt(
+                    job_id,
+                    "translation",
+                    "error",
+                    unit_id=chunk.id,
+                    model=model,
+                    message=last_error,
+                )
+                if "429" in text or "resource_exhausted" in text.lower():
+                    raise QuotaWait(
+                        "Gemini จำกัดอัตราการแปล จะลองใหม่ภายหลัง",
+                        datetime.now(UTC) + timedelta(minutes=1),
+                    ) from exc
+                # correction request cannot make an unavailable model recover.
+                break
+
+            try:
+                cues, warnings = validate_chunk(response.text or "", source, chunk)
+            except TranslationError as validation_error:
+                had_validation_error = True
+                last_error = str(validation_error)
+                db.record_attempt(
+                    job_id,
+                    "translation",
+                    "invalid",
+                    unit_id=chunk.id,
+                    model=model,
+                    message=last_error,
+                    usage=usage,
+                )
+                correction_errors = last_error.split("; ")
+                if attempt == 0:
+                    continue
+                break
+            except Exception as exc:
+                last_error = str(exc)[-1_200:]
+                db.record_attempt(
+                    job_id,
+                    "translation",
+                    "error",
+                    unit_id=chunk.id,
+                    model=model,
+                    message=last_error,
+                )
+                break
+            return cues, warnings, model
+        time.sleep(1)
+    error = f"ลองครบทุกโมเดลแล้ว: {last_error}"
+    if had_validation_error:
+        raise ChunkValidationError(error)
+    raise TranslationError(error)
+
+
 def translate(job_id: str, source: list[dict], work_dir: Path, source_language: str) -> list[dict]:
     key = gemini_api_key()
     if not key:
         raise TranslationError("ไม่พบ GEMINI_API_KEY ในไฟล์ .env")
-    chunks = build_chunks(job_id, source)
-    if not db.translation_chunks(job_id):
-        db.replace_translation_chunks(job_id, [asdict(chunk) for chunk in chunks])
+    pending = _translation_plan(job_id, source)
+    db.sync_translation_chunks(job_id, [asdict(chunk) for chunk in pending])
     result_dir = work_dir / "translation"
     result_dir.mkdir(parents=True, exist_ok=True)
     translated: list[dict] = []
     with genai.Client(api_key=key) as client:
         models = available_models(client)
-        for chunk in chunks:
-            checkpoint = result_dir / f"{chunk.index:04d}.json"
-            if checkpoint.is_file():
-                translated.extend(json.loads(checkpoint.read_text(encoding="utf-8")))
-                continue
-            last_error = "แปลไม่สำเร็จ"
-            for model in models:
-                correction_errors: list[str] = []
-                for attempt in range(2):
-                    system, contents, max_tokens = _request(
-                        source, chunk, source_language, correction_errors
+        position = 0
+        while position < len(pending):
+            chunk = pending[position]
+            checkpoint = _checkpoint_for(result_dir, chunk)
+            if checkpoint is not None:
+                try:
+                    completed = json.loads(checkpoint.read_text(encoding="utf-8"))
+                    if not isinstance(completed, list):
+                        raise ValueError("รูปแบบ checkpoint ไม่ใช่รายการ cue")
+                    translated.extend(completed)
+                    db.update_translation_chunk(
+                        chunk.id,
+                        status="completed",
+                        output_cue_count=len(completed),
+                        error=None,
                     )
-                    try:
-                        level = types.ThinkingLevel.MINIMAL if "lite" in model else types.ThinkingLevel.LOW
-                        response = client.models.generate_content(
-                            model=model,
-                            contents=contents,
-                            config={
-                                "system_instruction": system,
-                                "thinking_config": {"thinking_level": level},
-                                "max_output_tokens": max_tokens,
-                            },
-                        )
-                        usage = _usage(getattr(response, "usage_metadata", None))
-                        db.record_api_usage(
-                            job_id, "translation", model, total_tokens=usage["total"]
-                        )
-                        try:
-                            cues, warnings = validate_chunk(response.text or "", source, chunk)
-                        except TranslationError as validation_error:
-                            last_error = str(validation_error)
-                            db.record_attempt(
-                                job_id,
-                                "translation",
-                                "invalid",
-                                unit_id=chunk.id,
-                                model=model,
-                                message=last_error,
-                                usage=usage,
-                            )
-                            correction_errors = last_error.split("; ")
-                            if attempt == 0:
-                                continue
-                            break
-                        checkpoint.write_text(
-                            json.dumps(cues, ensure_ascii=False), encoding="utf-8"
-                        )
-                        translated.extend(cues)
-                        db.update_translation_chunk(
-                            chunk.id,
-                            status="completed",
-                            model=model,
-                            output_cue_count=len(cues),
-                            error=None,
-                        )
-                        db.record_attempt(
-                            job_id,
-                            "translation",
-                            "success",
-                            unit_id=chunk.id,
-                            model=model,
-                            message="; ".join(warnings) or None,
-                            usage=usage,
-                        )
-                        break
-                    except Exception as exc:
-                        text = str(exc)
-                        last_error = text[-1200:]
-                        db.record_attempt(
-                            job_id,
-                            "translation",
-                            "error",
-                            unit_id=chunk.id,
-                            model=model,
-                            message=last_error,
-                        )
-                        if "429" in text or "resource_exhausted" in text.lower():
-                            raise QuotaWait(
-                                "Gemini จำกัดอัตราการแปล จะลองใหม่ภายหลัง",
-                                datetime.now(UTC) + timedelta(minutes=1),
-                            ) from exc
-                        break
-                if checkpoint.is_file():
-                    break
-                time.sleep(1)
-            if not checkpoint.is_file():
-                db.update_translation_chunk(chunk.id, status="failed", error=last_error)
-                raise TranslationError(f"ลองครบทุกโมเดลแล้ว: {last_error}")
+                    position += 1
+                    continue
+                except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    # A truncated checkpoint must not permanently block a retry.
+                    checkpoint.unlink(missing_ok=True)
+                    db.update_translation_chunk(chunk.id, status="pending", error=str(exc))
+
+            try:
+                cues, warnings, model = _translate_chunk(
+                    job_id=job_id,
+                    source=source,
+                    chunk=chunk,
+                    source_language=source_language,
+                    client=client,
+                    models=models,
+                )
+            except ChunkValidationError as error:
+                children = split_chunk(chunk, source)
+                if children is not None:
+                    pending[position : position + 1] = list(children)
+                    _reindex_chunks(pending)
+                    db.sync_translation_chunks(job_id, [asdict(item) for item in pending])
+                    db.record_attempt(
+                        job_id,
+                        "translation",
+                        "split",
+                        unit_id=chunk.id,
+                        message=f"แบ่ง chunk ที่แปลไม่ผ่านเป็น {children[0].id} และ {children[1].id}",
+                    )
+                    continue
+                db.update_translation_chunk(chunk.id, status="failed", error=str(error))
+                raise
+            except TranslationError as error:
+                db.update_translation_chunk(chunk.id, status="failed", error=str(error))
+                raise
+
+            checkpoint = result_dir / f"{chunk.id}.json"
+            checkpoint.write_text(json.dumps(cues, ensure_ascii=False), encoding="utf-8")
+            translated.extend(cues)
+            db.update_translation_chunk(
+                chunk.id,
+                status="completed",
+                model=model,
+                output_cue_count=len(cues),
+                error=None,
+            )
+            db.record_attempt(
+                job_id,
+                "translation",
+                "success",
+                unit_id=chunk.id,
+                model=model,
+                message="; ".join(warnings) or None,
+            )
+            position += 1
     translated.sort(key=lambda cue: (cue["start_ms"], cue["end_ms"]))
     for index, cue in enumerate(translated, 1):
         cue["source_index"] = index

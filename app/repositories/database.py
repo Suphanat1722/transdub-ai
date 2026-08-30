@@ -1011,6 +1011,73 @@ def replace_translation_chunks(job_id: str, chunks: list[dict]) -> None:
         )
 
 
+def sync_translation_chunks(job_id: str, chunks: list[dict]) -> None:
+    """Synchronise a translation plan while retaining completed chunk metadata.
+
+    Translation can split a failed request into smaller requests.  Keeping this
+    operation incremental means a restart can still reuse checkpoints that were
+    already generated, while replacing the failed parent chunk with its children
+    does not leave stale ranges in the UI or database.
+    """
+    desired = {str(chunk["id"]): chunk for chunk in chunks}
+    with connect() as conn:
+        existing_rows = conn.execute(
+            "SELECT id FROM translation_chunks WHERE job_id=? ORDER BY chunk_index", (job_id,)
+        ).fetchall()
+        existing_ids = [str(row["id"]) for row in existing_rows]
+
+        # The unique(job_id, chunk_index) constraint makes a direct reorder
+        # unsafe (e.g. inserting a split child at index 1 while the old second
+        # chunk still occupies index 1).  Move all rows to a temporary range
+        # before applying the desired indexes.
+        for offset, chunk_id in enumerate(existing_ids):
+            conn.execute(
+                "UPDATE translation_chunks SET chunk_index=? WHERE id=? AND job_id=?",
+                (-1_000_000 - offset, chunk_id, job_id),
+            )
+
+        stale_ids = [chunk_id for chunk_id in existing_ids if chunk_id not in desired]
+        if stale_ids:
+            conn.executemany(
+                "DELETE FROM translation_chunks WHERE id=? AND job_id=?",
+                [(chunk_id, job_id) for chunk_id in stale_ids],
+            )
+
+        for index, chunk in enumerate(chunks):
+            chunk_id = str(chunk["id"])
+            values = (
+                index,
+                int(chunk["target_start"]),
+                int(chunk["target_end"]),
+                int(chunk["context_start"]),
+                int(chunk["context_end"]),
+                chunk_id,
+                job_id,
+            )
+            if chunk_id in existing_ids:
+                conn.execute(
+                    """UPDATE translation_chunks SET
+                       chunk_index=?,target_start=?,target_end=?,context_start=?,context_end=?
+                       WHERE id=? AND job_id=?""",
+                    values,
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO translation_chunks(
+                       id,job_id,chunk_index,target_start,target_end,context_start,context_end,status
+                    ) VALUES(?,?,?,?,?,?,?,'pending')""",
+                    (
+                        chunk_id,
+                        job_id,
+                        index,
+                        int(chunk["target_start"]),
+                        int(chunk["target_end"]),
+                        int(chunk["context_start"]),
+                        int(chunk["context_end"]),
+                    ),
+                )
+
+
 def translation_chunks(job_id: str) -> list[dict]:
     with connect() as conn:
         return [

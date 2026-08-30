@@ -27,6 +27,7 @@ TransDub AI เป็นเว็บแอปบน Windows สำหรับ�
 ## การทำงานและไฟล์
 
 - ค่าเริ่มต้นทำงานอัตโนมัติจนได้ MP4; เลือกพักหลัง transcript หรือ translation ได้
+- หาก Gemini รวม cue สั้นหรือส่ง timecode เหลื่อม ระบบจะแบ่ง chunk แล้วลองใหม่อัตโนมัติ พร้อมบันทึกคำเตือนการจับคู่ไว้ให้ตรวจ
 - แก้ข้อความ/timecode ในหน้าเว็บได้ ผลลัพธ์ถัดไปที่เกี่ยวข้องจะถูก invalidate และสร้างใหม่
 - ถ้าเสียงพากย์ยาวเกินวิดีโอ ระบบหยุดที่ `needs_review` และไม่ตัดคำพูดทิ้ง
 - เก็บ source/translated SRT, background FLAC, dub WAV/MP3, report และ final MP4

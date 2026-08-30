@@ -57,6 +57,36 @@ def test_job_cues_chunks_usage_and_artifacts(monkeypatch, tmp_path: Path) -> Non
     db.put_artifact("job", "source_srt", artifact, "text/srt")
     assert db.get_artifact("job", "source_srt")["kind"] == "source_srt"
 
+    db.replace_translation_chunks("job", [
+        {
+            "id": "chunk-a", "index": 0, "target_start": 0, "target_end": 0,
+            "context_start": 0, "context_end": 0,
+        },
+        {
+            "id": "chunk-b", "index": 1, "target_start": 1, "target_end": 1,
+            "context_start": 0, "context_end": 1,
+        },
+    ])
+    db.update_translation_chunk("chunk-b", status="completed", model="test-model")
+    db.sync_translation_chunks("job", [
+        {
+            "id": "chunk-a-left", "index": 0, "target_start": 0, "target_end": 0,
+            "context_start": 0, "context_end": 0,
+        },
+        {
+            "id": "chunk-a-right", "index": 1, "target_start": 1, "target_end": 1,
+            "context_start": 0, "context_end": 1,
+        },
+        {
+            "id": "chunk-b", "index": 2, "target_start": 2, "target_end": 2,
+            "context_start": 1, "context_end": 2,
+        },
+    ])
+    chunks = db.translation_chunks("job")
+    assert [chunk["id"] for chunk in chunks] == ["chunk-a-left", "chunk-a-right", "chunk-b"]
+    assert chunks[-1]["status"] == "completed"
+    assert chunks[-1]["chunk_index"] == 2
+
     db.update_job("job", status="transcribing", stage="separated", wait_reason=None)
     db.init_db(run_legacy_migration=False)
     recovered = db.get_job("job", include_cues=False)
