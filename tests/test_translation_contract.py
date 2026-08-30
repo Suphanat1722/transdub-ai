@@ -87,6 +87,63 @@ def test_translation_validation_does_not_hide_omitted_long_cue() -> None:
         validate_chunk(output, source, Chunk("c1", 0, 0, 2, 0, 2))
 
 
+def test_translation_validation_accepts_long_cues_merged_into_one_block() -> None:
+    from app.services.translation import format_timestamp
+
+    # source 115-120 are contiguous fragments (gap <= 100ms) with run > 1200ms.
+    # Gemini merges 116-118 into a single block whose time range contains them.
+    source = [
+        {"position": 115, "source_index": "115", "start_ms": 241600, "end_ms": 244200, "text": "a."},
+        {"position": 116, "source_index": "116", "start_ms": 244200, "end_ms": 247800, "text": "b."},
+        {"position": 117, "source_index": "117", "start_ms": 247800, "end_ms": 249500, "text": "c."},
+        {"position": 118, "source_index": "118", "start_ms": 249600, "end_ms": 251300, "text": "d."},
+        {"position": 119, "source_index": "119", "start_ms": 251400, "end_ms": 255600, "text": "e."},
+        {"position": 120, "source_index": "120", "start_ms": 255600, "end_ms": 256400, "text": "f."},
+    ]
+    chunk = Chunk("merged", 0, 0, 5, 0, 5)
+    # Merged block covering 116-118 (244200..251300) contains both long absorbed
+    # cues, so it must be accepted instead of rejected as a dropped long cue.
+    output = (
+        f"1\n{format_timestamp(241600)} --> {format_timestamp(251300)}\nขยับเข้ามาเป็นหนึ่งชุด\n\n"
+        f"2\n{format_timestamp(251400)} --> {format_timestamp(255600)}\nแล้วต่อด้วยอีกชุด\n\n"
+        f"3\n{format_timestamp(255600)} --> {format_timestamp(256400)}\nแล้วก็ท้ายชุด"
+    )
+    cues, warnings = validate_chunk(output, source, chunk)
+    covered = {p for cue in cues for p in cue["source_cue_indexes"]}
+    assert {116, 117, 118} <= covered
+
+
+def test_parse_model_srt_tolerates_fused_index_and_inline_text() -> None:
+    # Gemini often collapses the subtitle index onto the timecode line and may
+    # put the spoken text on the same line.  Both forms must parse, with the
+    # time positions still aligned so validation can map them to source cues.
+    raw = """1
+00:00:00,000 --> 00:00:01,000
+หนึ่ง
+
+2 00:00:01,200 --> 00:00:02,000
+สอง
+
+3  00:00:02,700 --> 00:00:03,500 สาม
+"""
+    cues = parse_model_srt(raw)
+    assert [(c["start_ms"], c["end_ms"]) for c in cues] == [
+        (0, 1000),
+        (1200, 2000),
+        (2700, 3500),
+    ]
+    assert [c["text"] for c in cues] == ["หนึ่ง", "สอง", "สาม"]
+
+
+def test_parse_model_srt_still_rejects_empty_cue() -> None:
+    # The parser must keep enforcing structural integrity: a cue without text
+    # or with an inverted time range is still an error, not silently accepted.
+    with pytest.raises(TranslationError, match="ว่างหรือมีเวลาไม่ถูกต้อง"):
+        parse_model_srt("1\n00:00:00,000 --> 00:00:01,000\n\n")
+    with pytest.raises(TranslationError, match="ว่างหรือมีเวลาไม่ถูกต้อง"):
+        parse_model_srt("1\n00:00:03,000 --> 00:00:01,000\nสวัสดี")
+
+
 def test_split_chunk_preserves_source_coverage_and_context() -> None:
     source = [
         {

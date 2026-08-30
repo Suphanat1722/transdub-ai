@@ -15,23 +15,74 @@ from ..core.config import TRANSLATION_MODELS, gemini_api_key
 from ..repositories import database as db
 from .transcription import QuotaWait
 
-DEFAULT_TRANSLATION_PROMPT = """คุณเป็นนักแปลซับไตเติลและผู้เรียบเรียงบทพากย์ภาษาไทยมืออาชีพ
-แปล SRT เป็นภาษาไทยสำหรับระบบ TTS โดยอ่านบริบทหลาย cue ก่อนแปล รักษาความหมาย น้ำเสียง
-ข้อมูล และ timecode ของต้นฉบับให้ครบ ห้ามสรุปหรือตัดข้อมูล
+DEFAULT_TRANSLATION_PROMPT = """คุณเป็นนักแปลซับไตเติลและผู้เรียบเรียงบทพากย์ภาษาไทยมืออาชีพ งานของคุณคือแปลไฟล์ SRT ที่ได้รับเป็นภาษาไทย เพื่อนำไปสร้างเสียงพากย์ด้วยระบบ TTS
 
-กฎสำคัญ:
-- ใช้ภาษาไทยแบบภาษาพูดที่เป็นธรรมชาติและสม่ำเสมอ
-- ต้องแปลทุก cue ใน TARGET แม้ cue นั้นจะสั้นมาก ห้ามข้ามหรือรวมจนเนื้อหาหาย
-- พยายามใช้ start/end เดิมของแต่ละ cue; หากรวม cue ให้ช่วงเวลาครอบคลุม cue ต้นฉบับทุกตัวที่รวม
-- ห้ามสร้างเวลาซ้อน ย้อน หรือออกนอกช่วง TARGET
-- ห้ามทิ้งเศษประโยคหรือคำเชื่อมไว้เป็น cue เดี่ยว
-- ชื่อเฉพาะและ identifier ให้ถอดเสียงเป็นไทย หากเป็นคำอังกฤษสั้น ๆ ที่อยู่เดี่ยว ๆ ให้แปลงเป็นคำอ่านไทย
-- ตัวเลข ตัวย่อ สัญลักษณ์ และหน่วยต้องอยู่ในรูปที่ TTS ไทยอ่านได้
-- ส่งกลับเฉพาะ SRT ห้ามมี code block หรือคำอธิบาย"""
+ห้ามแปลแยกทีละ cue โดยไม่ดูบริบท ให้อ่านหลาย cue ที่ต่อเนื่องกันก่อน ประกอบเป็นประโยคหรือความคิดที่สมบูรณ์ แล้วจึงแปล
 
+---
+
+## กฎการแปลเนื้อหา
+
+1. รักษาความหมาย ข้อมูล น้ำเสียง และเจตนาของต้นฉบับให้ครบถ้วน ห้ามสรุป ตัดทอน หรือเพิ่มข้อมูลที่ไม่มีในต้นฉบับ
+2. ใช้ภาษาไทยแบบภาษาพูดที่เป็นธรรมชาติ เหมาะกับการพากย์และ TTS ไม่แปลแข็งแบบคำต่อคำ
+3. **สรรพนามและระดับภาษา**: เลือกสรรพนามผู้พูด (เช่น "ผม" หรือ "เรา") และระดับความเป็นทางการตั้งแต่ cue แรก แล้วใช้คำเดิมนั้นตลอดทั้งไฟล์ ห้ามสลับไปมาโดยไม่มีเหตุผลจากต้นฉบับ (เช่น เปลี่ยนเพราะเปลี่ยนผู้พูดจริง)
+
+## กฎการรวม/แบ่ง cue
+
+4. รวม cue ที่เป็นส่วนของประโยคหรือความคิดเดียวกันได้ โดยใช้เวลาเริ่มของ cue แรกและเวลาจบของ cue สุดท้าย
+5. **การรวมข้ามผู้พูด**: หากต้นฉบับมีสัญลักษณ์ระบุผู้พูดชัดเจน (เช่น ขึ้นต้นด้วย "- ", หรือมี tag ชื่อผู้พูด) ห้ามรวม cue ข้ามผู้พูดเด็ดขาด หากต้นฉบับ**ไม่มี**สัญลักษณ์ระบุผู้พูดเลย ให้ยึดความต่อเนื่องของเนื้อหาเป็นหลักในการตัดสินใจรวม/ไม่รวม
+6. แต่ละ cue ต้องเป็นช่วงคำพูดที่ฟังรู้เรื่องและสมบูรณ์ในตัวเอง ห้ามมีคำเชื่อม คำสั้น คำภาษาอังกฤษ หรือเศษประโยคอยู่เดี่ยว ๆ
+7. หากข้อความยาวเกินจังหวะพูด ให้แบ่งตามจังหวะความหมาย ห้ามแบ่งกลางวลี
+8. ห้ามสร้าง timecode ที่ซ้อนทับกัน ย้อนเวลา หรือหลุดออกนอกช่วงเวลารวมของ cue ต้นฉบับ
+
+## กฎการจัดการภาษาอังกฤษและศัพท์เทคนิค
+
+9. ผลลัพธ์ต้องไม่มีตัวอักษรภาษาอังกฤษ A-Z หรือ a-z หลงเหลืออยู่เลย ทุกคำต้องแปลหรือถอดเสียงเป็นอักษรไทยที่ TTS อ่านออกเสียงได้ถูกต้อง
+10. คำทั่วไปให้แปลตามความหมาย ส่วนชื่อเฉพาะ แบรนด์ บุคคล สถานที่ ผลิตภัณฑ์ หรือเทคโนโลยี ให้ถอดเสียงเป็นภาษาไทย เช่น Unity → ยูนิตี้, YouTube → ยูทูบ, Google → กูเกิล
+11. ชื่อตัวแปร ฟังก์ชัน เมธอด คลาส พร็อพเพอร์ตี้ อ็อบเจ็กต์ ค่าคงที่ และ identifier ในโค้ด **ห้ามแปลความหมาย** ให้ถอดเสียงชื่อเดิมตามลำดับคำเดิมเท่านั้น เช่น:
+    - `moveSpeed` → มูฟสปีด (ห้ามแปลเป็น "ความเร็วเคลื่อนที่")
+    - `playerHealth` → เพลเยอร์เฮลธ์ (ห้ามแปลเป็น "พลังชีวิตผู้เล่น")
+    - `maxJumpHeight` → แม็กซ์จัมป์ไฮต์
+    - `GetComponent` → เก็ตคอมโพเนนต์
+    - `isGrounded` → อิสกราวน์เด็ด
+12. หากคำเดียวกันไม่ได้ใช้เป็นชื่อในโค้ด แต่เป็นคำทั่วไปในประโยคปกติ ให้แปลตามความหมายตามปกติ (ไม่ต้องถอดเสียงแบบข้อ 11)
+13. **สัญลักษณ์และโอเปอเรเตอร์ในโค้ดที่พูดออกเสียง** ให้แปลงเป็นคำอ่านภาษาไทยที่สื่อความหมายเดิม เช่น:
+    - `==` → เท่ากับเท่ากับ หรือ เทียบเท่ากับ (ตามบริบท)
+    - `!=` → ไม่เท่ากับ
+    - `->` หรือ `=>` → ลูกศรไปยัง / ส่งต่อไปยัง
+    - `%` → เปอร์เซ็นต์ หรือ มอด (ถ้าเป็น modulo ในโค้ด)
+    - `&&` → แอนด์ / และ, `||` → ออร์ / หรือ
+14. ตัวเลข ตัวย่อ สัญลักษณ์ และหน่วย ให้ปรับเป็นรูปแบบที่ TTS ภาษาไทยอ่านได้ โดยห้ามเปลี่ยนค่าหรือความหมายเดิม
+15. ห้ามเขียนภาษาอังกฤษกำกับในวงเล็บ เช่น "ยูนิตี้ (Unity)" ให้เขียนเพียง "ยูนิตี้"
+
+## กฎความสม่ำเสมอ
+
+16. คำแปลและคำถอดเสียงของคำเดียวกัน ต้องใช้รูปแบบเดียวกันตลอดทั้งไฟล์ (เช่น ถ้าเลือกถอด `maxJumpHeight` เป็น "แม็กซ์จัมป์ไฮต์" ในครั้งแรก ต้องใช้คำเดิมนี้ทุกครั้งที่พบคำนี้อีก)
+17. ลบเฉพาะ markup ที่ไม่จำเป็นต่อการออกเสียง (เช่น ป้ายกำกับสไตล์) แต่ห้ามลบข้อความที่มีความหมาย
+
+## การตรวจทานก่อนตอบ
+
+18. ก่อนส่งคำตอบ ให้ตรวจทานทีละ cue จริง (ไม่ใช่แค่สรุปว่าผ่าน) ว่า:
+    - ไม่มีตัวอักษร A-Z / a-z หลงเหลือ
+    - ไม่มี cue ว่างหรือเศษประโยคเดี่ยว ๆ
+    - ไม่มี timecode ซ้อนทับหรือย้อนเวลา
+    - หมายเลข cue เรียงใหม่ตั้งแต่ 1 ต่อเนื่องกันไม่ขาดตอน
+    - คำถอดเสียงเดียวกันสะกดตรงกันทุกจุดที่ปรากฏในไฟล์นี้
+
+กฎทั้งหมดนี้ใช้กับเนื้อหาทุกประเภท ไม่จำกัดเฉพาะโปรแกรมมิ่งหรือเทคโนโลยี
+
+---
+
+**รูปแบบคำตอบ**: ตอบเป็นไฟล์ SRT ที่ถูกต้องตามมาตรฐานเท่านั้น ห้ามใส่คำอธิบาย ห้ามใช้ Markdown และห้ามครอบด้วย code block"""
+
+# Gemini sometimes collapses the subtitle index and the timecode onto one line
+# (e.g. ``2 00:00:02,000 --> 00:00:03,000``), and may append the spoken line to
+# the same timecode line (``... --> ... หนึ่ง``).  Accept an optional leading
+# index without shifting the first eight capture groups that ``_ms`` depends on,
+# and capture any trailing-on-line text as group 9.
 TIME_RE = re.compile(
-    r"^(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
-    r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})(?:\s+.*)?$"
+    r"^(?:\d{1,3}\s+)?(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
+    r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})(?:\s+(.*))?$"
 )
 # JaiTTS can speak Latin characters embedded in a Thai sentence only when the
 # user has deliberately supplied a glossary.  A bare English token, however,
@@ -118,8 +169,15 @@ def parse_model_srt(raw: str) -> list[dict]:
         match = TIME_RE.match(lines[time_index])
         assert match is not None
         start_ms = _ms(match.groups()[:4])
-        end_ms = _ms(match.groups()[4:])
-        text = " ".join(line for line in lines[time_index + 1 :] if line).strip()
+        end_ms = _ms(match.groups()[4:8])
+        # Text may share the timecode line (``... --> ... หนึ่ง``) instead of
+        # starting on the following line.  Join both so nothing is dropped.
+        trailing = (match.group(9) or "").strip()
+        text = " ".join(
+            line
+            for line in [trailing, *lines[time_index + 1 :]]
+            if line.strip()
+        ).strip()
         if not text or end_ms <= start_ms:
             raise TranslationError(f"ผลแปล cue {block_number} ว่างหรือมีเวลาไม่ถูกต้อง")
         cues.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
@@ -263,9 +321,29 @@ def _alignment_limit(source_cue: dict) -> int:
     return SHORT_CUE_ALIGNMENT_MS if duration <= 1_200 else ALIGNMENT_TOLERANCE_MS // 2
 
 
-def _can_fallback_align(source_cue: dict, gap: int) -> bool:
-    """Do not hide a completely omitted long cue at an exact boundary."""
+def _interval_contains(outer: dict, inner: dict) -> bool:
+    """True when ``inner`` falls fully inside ``outer``'s time range.
+
+    Merging is the one signal that is unambiguous: a source cue that lies
+    inside a single translated cue's interval was absorbed into that cue
+    (not omitted), so acknowledging it never hides a genuinely dropped line.
+    """
+    return int(outer["start_ms"]) <= int(inner["start_ms"]) and int(inner["end_ms"]) <= int(outer["end_ms"])
+
+
+def _can_fallback_align(source_cue: dict, gap: int, *, contained_in_translation: bool = False) -> bool:
+    """Allow a source cue to share a translated cue when they are adjacent.
+
+    A standalone long cue that was dropped entirely must still fail, but a long
+    cue absorbed into one merged translated line's time range should not.  The
+    ``contained_in_translation`` signal distinguishes those two cases even when
+    the boundaries touch exactly (gap == 0).
+    """
+    if contained_in_translation:
+        return True
     duration = int(source_cue["end_ms"]) - int(source_cue["start_ms"])
+    if duration > 1_200 and gap == 0:
+        return False
     return gap <= _alignment_limit(source_cue) and (duration <= 1_200 or gap > 0)
 
 
@@ -312,7 +390,7 @@ def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dic
         if not indexes and target:
             nearest = min(target, key=lambda item: _interval_gap(cue, item))
             gap = _interval_gap(cue, nearest)
-            if _can_fallback_align(nearest, gap):
+            if _can_fallback_align(nearest, gap, contained_in_translation=_interval_contains(cue, nearest)):
                 indexes = [nearest["position"]]
                 alignment_warnings.append(
                     f"จับคู่ cue {index} กับ cue ต้นฉบับ {nearest['source_index']} "
@@ -353,7 +431,9 @@ def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dic
             enumerate(results), key=lambda item: _interval_gap(item[1], source_cue)
         )
         gap = _interval_gap(nearest_result, source_cue)
-        if _can_fallback_align(source_cue, gap):
+        if _can_fallback_align(
+            source_cue, gap, contained_in_translation=_interval_contains(nearest_result, source_cue)
+        ):
             nearest_result["source_cue_indexes"].append(source_cue["position"])
             covered.add(source_cue["position"])
             warning = (
