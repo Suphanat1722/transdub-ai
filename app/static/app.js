@@ -90,6 +90,8 @@ function showCreate() {
   if (state.events) state.events.close();
   state.current = null;
   $("#create-panel").hidden = false; $("#job-panel").hidden = true;
+  const btn = $("#delete-job-btn");
+  if (btn) btn.onclick = null;
   renderJobList();
 }
 
@@ -97,6 +99,7 @@ async function openJob(id) {
   state.current = await api(`/api/jobs/${id}`);
   $("#create-panel").hidden = true; $("#job-panel").hidden = false;
   renderJob(); renderJobList();
+  bindDeleteButton();
   state.offset = 0; await loadCues();
   if (state.events) state.events.close();
   if (!["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) {
@@ -140,12 +143,16 @@ function renderActions(job) {
   if (job.status === "reviewing_transcript") actions.push(["approve_transcript", "ยืนยัน transcript และแปลต่อ"]);
   if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"]);
   if (job.status === "completed" && job.artifacts?.some((item) => item.kind === "dub_wav")) actions.push(["remux", "มิกซ์ MP4 ใหม่"]);
-  if (!active) actions.push(["delete", "ลบ"]);
   $("#actions").innerHTML = actions.map(([action, label], index) => {
-    const cls = action === "delete" ? "danger" : index === 0 ? "primary" : "secondary";
+    const cls = index === 0 ? "primary" : "secondary";
     return `<button data-action="${action}" class="${cls}">${label}</button>`;
   }).join("");
   document.querySelectorAll("#actions button").forEach((button) => button.onclick = () => runAction(button.dataset.action));
+}
+
+function bindDeleteButton() {
+  const button = $("#delete-job-btn");
+  button.onclick = () => runAction("delete");
 }
 
 async function runAction(action) {
