@@ -12,7 +12,7 @@ from .repositories import database
 from .services.inference import inference_service
 from .services.worker import worker
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 @asynccontextmanager

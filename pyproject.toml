@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transdub-ai"
-version = "1.0.0"
+version = "1.0.1"
 description = "End-to-end local Thai video dubbing with Gemini, JaiTTS, Demucs and FFmpeg"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
