@@ -582,8 +582,43 @@ def list_jobs() -> list[dict]:
 
 
 def delete_job(job_id: str) -> bool:
+    deleted = False
     with connect() as conn:
-        return bool(conn.execute("DELETE FROM jobs WHERE id=?", (job_id,)).rowcount)
+        deleted = bool(conn.execute("DELETE FROM jobs WHERE id=?", (job_id,)).rowcount)
+    if deleted:
+        # The shared audio cache may hold WAVs generated only for this job.
+        # Drop any entry no longer referenced by a remaining cue, and delete
+        # the file on disk, so deleting a project does not leave orphan files.
+        _purge_unreferenced_cache()
+    return deleted
+
+
+def _purge_unreferenced_cache() -> None:
+    with connect() as conn:
+        rows = conn.execute("SELECT cache_key,path FROM audio_cache").fetchall()
+        referenced = {
+            row["cache_key"]
+            for row in conn.execute(
+                "SELECT DISTINCT cache_key FROM cues WHERE cache_key IS NOT NULL"
+            ).fetchall()
+        }
+        ids_to_delete = [row["cache_key"] for row in rows if row["cache_key"] not in referenced]
+        if ids_to_delete:
+            placeholders = ",".join("?" for _ in ids_to_delete)
+            conn.execute(
+                f"DELETE FROM audio_cache WHERE cache_key IN ({placeholders})", ids_to_delete
+            )
+        files_to_delete = [
+            row["path"] for row in rows if row["cache_key"] not in referenced
+        ]
+    cache_root = CACHE_DIR.resolve()
+    for value in files_to_delete:
+        try:
+            path = resolve_data_path(value)
+        except ValueError:
+            continue
+        if path.is_file() and path.resolve().is_relative_to(cache_root):
+            path.unlink(missing_ok=True)
 
 
 def update_job(job_id: str, **fields) -> None:
