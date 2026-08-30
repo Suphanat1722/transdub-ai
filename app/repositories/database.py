@@ -495,6 +495,35 @@ def create_job(
         )
 
 
+def _translation_progress(conn, job_id: str) -> dict | None:
+    rows = conn.execute(
+        "SELECT chunk_index,status FROM translation_chunks WHERE job_id=? ORDER BY chunk_index",
+        (job_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    by_status: dict[str, int] = {}
+    for row in rows:
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+    total = len(rows)
+    completed = by_status.get("completed", 0)
+    failed = by_status.get("failed", 0)
+    # Next chunk to work on: the first non-completed chunk, 1-based.
+    current_index = next(
+        (row["chunk_index"] + 1 for row in rows if row["status"] != "completed"),
+        total,
+    )
+    progress = round(completed / total * 100, 1) if total else 0
+    return {
+        "chunks_total": total,
+        "chunks_completed": completed,
+        "chunks_failed": failed,
+        "current_chunk": current_index,
+        "progress": progress,
+        "in_progress": any(row["status"] == "pending" for row in rows),
+    }
+
+
 def get_job(job_id: str, include_cues: bool = True) -> dict | None:
     with connect() as conn:
         job = row_dict(
@@ -552,6 +581,7 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
         job["eta_seconds"] = (
             round(remaining * job["average_cue_ms"] / 1000) if job["average_cue_ms"] else None
         )
+        job["translation_progress"] = _translation_progress(conn, job_id)
         return job
 
 

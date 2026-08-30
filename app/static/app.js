@@ -118,6 +118,7 @@ function renderJob() {
   $("#job-status").textContent = statusNames[job.status] || job.status;
   $("#job-status").className = `badge ${job.status}`;
   $("#job-progress").style.width = `${Number(job.progress || 0)}%`;
+  renderTranslationProgress(job);
   let message = job.error || job.wait_reason || `คืบหน้า ${Number(job.progress || 0).toFixed(0)}%`;
   if (job.stage === "synthesizing" && job.total_cues) {
     const done = job.completed_cues || 0;
@@ -131,6 +132,21 @@ function renderJob() {
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
   $("#job-warnings").innerHTML = (job.warnings || []).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
   renderActions(job); renderArtifacts(job.artifacts || []);
+}
+
+function renderTranslationProgress(job) {
+  const box = $("#translate-progress");
+  if (!box) return;
+  const tp = job.translation_progress;
+  const translating = ["translating", "waiting_quota"].includes(job.status);
+  if (!tp || !tp.chunks_total || !translating) { box.hidden = true; return; }
+  box.hidden = false;
+  $("#translate-progress-bar").style.width = `${tp.progress}%`;
+  const current = tp.current_chunk || 0;
+  let hint = `แปลช่วง ${current}/${tp.chunks_total}`;
+  if (tp.chunks_failed > 0) hint += ` · พลาด ${tp.chunks_failed} ช่วง`;
+  if (job.status === "waiting_quota") hint += " · รอ quota อยู่";
+  $("#translate-hint").textContent = hint;
 }
 
 function renderActions(job) {

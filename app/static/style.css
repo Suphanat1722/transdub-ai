@@ -3,3 +3,5 @@
 .danger{background:#3a2020;color:#ffacac}.danger:hover{background:#512727}
 
 .job-title .title-actions{display:flex;align-items:center;gap:10px}.delete-job{width:40px;height:40px;display:grid;place-items:center;border:0;border-radius:11px;background:#252c31;color:var(--text);font:inherit;font-size:16px;cursor:pointer}.delete-job:hover{background:#3a2020;color:#ffacac}
+
+.translate-progress{margin-top:10px}.translate-progress .progress{margin-top:0}.translate-hint{color:var(--muted);font-size:12px;margin:8px 0 0}
