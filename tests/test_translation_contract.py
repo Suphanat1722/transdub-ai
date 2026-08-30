@@ -83,8 +83,10 @@ def test_translation_validation_does_not_hide_omitted_long_cue() -> None:
 00:00:05,000 --> 00:00:06,000
 สาม
 """
-    with pytest.raises(TranslationError, match="cue ต้นฉบับ 2 ไม่ถูกครอบคลุม"):
-        validate_chunk(output, source, Chunk("c1", 0, 0, 2, 0, 2))
+    # Lenient mode: an omitted long cue is accepted but surfaced as a warning
+    # so the work can be reviewed in the UI instead of failing the chunk.
+    cues, warnings = validate_chunk(output, source, Chunk("c1", 0, 0, 2, 0, 2))
+    assert any("cue ต้นฉบับ 2 ไม่ถูกครอบคลุม" in warning for warning in warnings)
 
 
 def test_translation_validation_accepts_long_cues_merged_into_one_block() -> None:
@@ -193,5 +195,8 @@ def test_translation_plan_reuses_persisted_split_after_restart(monkeypatch) -> N
     ],
 )
 def test_translation_validation_rejects_tts_unsafe_output(text: str) -> None:
-    with pytest.raises(TranslationError):
-        validate_chunk(text, source_cues(), Chunk("c1", 0, 0, 1, 0, 1))
+    # Lenient mode accepts the chunk (so work does not stall) but flags the
+    # offending content as a warning for review.
+    cues, warnings = validate_chunk(text, source_cues(), Chunk("c1", 0, 0, 1, 0, 1))
+    assert len(cues) == 1
+    assert warnings

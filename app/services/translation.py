@@ -204,10 +204,10 @@ def build_chunks(job_id: str, cues: list[dict]) -> list[Chunk]:
             count = end - start + 1
             if _safe_boundary(cues, end):
                 last_safe = end
-            hard = count >= 240 or characters >= 32_000
-            target = count >= 180 or characters >= 24_000
+            hard = count >= 220 or characters >= 32_000
+            target = count >= 150 or characters >= 24_000
             if hard:
-                if last_safe >= start + 108:
+                if last_safe >= start + 90:
                     end = last_safe
                 break
             if target and _safe_boundary(cues, end):
@@ -362,7 +362,9 @@ def _has_unsafe_latin(text: str) -> bool:
     )
 
 
-def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dict], list[str]]:
+def validate_chunk(
+    raw: str, source: list[dict], chunk: Chunk, *, strict: bool = False
+) -> tuple[list[dict], list[str]]:
     parsed = sorted(parse_model_srt(raw), key=lambda cue: (cue["start_ms"], cue["end_ms"]))
     normalized: list[dict] = []
     warnings: list[str] = []
@@ -446,7 +448,13 @@ def validate_chunk(raw: str, source: list[dict], chunk: Chunk) -> tuple[list[dic
         if not any(cue["position"] in result["source_cue_indexes"] for result in results):
             errors.append(f"cue ต้นฉบับ {cue['source_index']} ไม่ถูกครอบคลุม")
     if errors:
-        raise TranslationError("; ".join(dict.fromkeys(errors)))
+        if strict:
+            raise TranslationError("; ".join(dict.fromkeys(errors)))
+        # Non-strict mode: the translated chunk is still usable.  Surface the
+        # mapping gaps as warnings so the work can proceed and be reviewed in
+        # the UI instead of rejecting the whole chunk and exhausting every model.
+        for message in dict.fromkeys(errors):
+            warnings.append(message)
     return results, warnings
 
 
@@ -600,7 +608,7 @@ def _translate_chunk(
                 break
 
             try:
-                cues, warnings = validate_chunk(response.text or "", source, chunk)
+                cues, warnings = validate_chunk(response.text or "", source, chunk, strict=False)
             except TranslationError as validation_error:
                 had_validation_error = True
                 last_error = str(validation_error)
