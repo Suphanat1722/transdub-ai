@@ -552,8 +552,9 @@ def _translate_chunk(
     models: list[str],
 ) -> tuple[list[dict], list[str], str]:
     """Generate and validate one chunk, trying every configured model."""
-    last_error = "แปลไม่สำเร็จ"
+    last_error = "แปลไม่สําเร็จ"
     had_validation_error = False
+    saw_quota_exhausted = False
     for model in models:
         correction_errors: list[str] = []
         for attempt in range(2):
@@ -600,11 +601,12 @@ def _translate_chunk(
                     message=last_error,
                 )
                 if "429" in text or "resource_exhausted" in text.lower():
-                    raise QuotaWait(
-                        "Gemini จำกัดอัตราการแปล จะลองใหม่ภายหลัง",
-                        datetime.now(UTC) + timedelta(minutes=1),
-                    ) from exc
-                # correction request cannot make an unavailable model recover.
+                    # 429 is project-wide quota, not specific to this model.
+                    # Break out and try the remaining (cheaper) models in the
+                    # chain first — the lite model may still have quota left.
+                    saw_quota_exhausted = True
+                # A quota error cannot be fixed by a correction retry here, and
+                # an unavailable model cannot recover in-process either.
                 break
 
             try:
@@ -638,6 +640,11 @@ def _translate_chunk(
                 break
             return cues, warnings, model
         time.sleep(1)
+    if saw_quota_exhausted:
+        raise QuotaWait(
+            "Gemini จํากัดอัตราการแปล จะลองใหม่ภายหลัง",
+            datetime.now(UTC) + timedelta(minutes=2),
+        )
     error = f"ลองครบทุกโมเดลแล้ว: {last_error}"
     if had_validation_error:
         raise ChunkValidationError(error)
