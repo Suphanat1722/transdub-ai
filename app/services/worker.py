@@ -39,7 +39,7 @@ from .media import (
 )
 from .speech_generation import apply_glossary
 from .transcription import QuotaWait, transcribe
-from .translation import serialize_srt, translate
+from .translation import TranslationError, serialize_srt, translate
 
 logger = logging.getLogger(__name__)
 
@@ -245,10 +245,25 @@ class JobWorker:
         job_dir = JOBS_DIR / job_id
         source = db.source_cues(job_id)
         if not source:
-            raise RuntimeError("ไม่มี source cue สำหรับแปล")
-        translated = translate(
-            job_id, source, job_dir / "work", job.get("source_language") or "auto"
-        )
+            raise RuntimeError("ไม่มี source cue สําหรับแปล")
+        try:
+            translated = translate(
+                job_id, source, job_dir / "work", job.get("source_language") or "auto"
+            )
+        except QuotaWait:
+            raise
+        except TranslationError as exc:
+            # All models answered unusably (or never returned).  Let the user
+            # decide how to proceed instead of failing the whole job: park it in
+            # needs_review with the reason visible in the UI.
+            logger.warning("Translation exhausted all models: %s", exc)
+            db.update_job(
+                job_id,
+                status="needs_review",
+                error=None,
+                wait_reason=f"แปลไม่ผ่านโมเดลทั้งหมด: {exc}",
+            )
+            return
         db.replace_translation_cues(job_id, translated)
         translated_srt = job_dir / "artifacts" / "translated.th.srt"
         translated_srt.parent.mkdir(parents=True, exist_ok=True)

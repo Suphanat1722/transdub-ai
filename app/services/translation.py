@@ -647,7 +647,11 @@ def translate(job_id: str, source: list[dict], work_dir: Path, source_language: 
     result_dir = work_dir / "translation"
     result_dir.mkdir(parents=True, exist_ok=True)
     translated: list[dict] = []
-    with genai.Client(api_key=key) as client:
+    timeout_seconds = 90
+    with genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(timeout=timeout_seconds * 1000),
+    ) as client:
         models = available_models(client)
         position = 0
         while position < len(pending):
