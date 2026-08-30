@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TransDub AI</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><span class="mark">TD</span><strong>TransDub AI</strong><small>พากย์วิดีโอไทยครบสายงาน</small></div>
+    <span id="health" class="health">กำลังตรวจระบบ…</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">VIDEO → TRANSCRIPT → THAI → VOICE → MP4</p>
+      <h1>เลือกวิดีโอครั้งเดียว<br><em>แล้วปล่อยให้ระบบพากย์จนจบ</em></h1>
+      <p>เสียงและโมเดลทำงานบนเครื่อง ข้อความสำหรับถอดและแปลเท่านั้นที่ส่งไป Gemini</p>
+    </section>
+
+    <section id="system-warning" class="warning" hidden></section>
+
+    <div class="layout">
+      <aside>
+        <button id="new-job-tab" class="primary wide">＋ สร้างงานใหม่</button>
+        <div class="aside-head"><span>งานทั้งหมด</span><button id="refresh-jobs">↻</button></div>
+        <div id="job-list" class="job-list"></div>
+      </aside>
+
+      <section class="workspace">
+        <div id="create-panel">
+          <h2>สร้างงานพากย์</h2>
+          <form id="job-form">
+            <label class="drop" id="video-drop">
+              <input id="video" name="video" type="file" accept="video/*,.mkv,.mov,.webm" required>
+              <span class="drop-icon">▶</span>
+              <strong>เลือกหรือลากไฟล์วิดีโอ</strong>
+              <small id="video-name">รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB</small>
+            </label>
+            <div class="grid two">
+              <label>โปรไฟล์เสียง
+                <select id="voice-profile" name="voice_profile_id" required></select>
+              </label>
+              <label>ภาษาต้นฉบับ
+                <input name="source_language" value="auto" placeholder="auto หรือ en-US">
+              </label>
+            </div>
+            <div class="grid two sliders">
+              <label>เสียงพื้นหลัง <output id="background-value">100%</output>
+                <input name="background_volume" type="range" min="0" max="150" value="100">
+              </label>
+              <label>เสียงพากย์ <output id="voice-value">100%</output>
+                <input name="voice_volume" type="range" min="0" max="150" value="100">
+              </label>
+            </div>
+            <div class="checks">
+              <label><input name="pause_after_transcription" type="checkbox"> พักเพื่อตรวจ transcript</label>
+              <label><input name="pause_after_translation" type="checkbox"> พักเพื่อตรวจคำแปล</label>
+            </div>
+            <button class="primary wide" type="submit">เริ่มพากย์วิดีโอ</button>
+            <div id="upload-progress" class="upload-progress" hidden><span></span></div>
+          </form>
+
+          <details class="profile-box">
+            <summary>สร้างโปรไฟล์เสียงใหม่</summary>
+            <form id="profile-form" class="profile-form">
+              <input name="name" placeholder="ชื่อโปรไฟล์" maxlength="80" required>
+              <textarea name="transcript" placeholder="ข้อความที่พูดในไฟล์เสียง ต้องตรงทุกคำ" required></textarea>
+              <input name="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" required>
+              <button class="secondary" type="submit">สร้างโปรไฟล์</button>
+            </form>
+          </details>
+        </div>
+
+        <div id="job-panel" hidden>
+          <div class="job-title">
+            <div><p class="eyebrow" id="job-id"></p><h2 id="job-name"></h2></div>
+            <span id="job-status" class="badge"></span>
+          </div>
+          <div class="progress"><span id="job-progress"></span></div>
+          <div id="stage-track" class="stage-track"></div>
+          <p id="job-message" class="job-message"></p>
+          <div id="job-warnings" class="warning-list"></div>
+          <div id="actions" class="actions"></div>
+
+          <section class="card">
+            <div class="card-head"><h3>ไฟล์ผลลัพธ์</h3></div>
+            <div id="artifacts" class="artifacts"></div>
+          </section>
+
+          <section class="card editor-card">
+            <div class="card-head">
+              <h3>ตรวจและแก้ข้อความ</h3>
+              <div class="tabs"><button data-layer="source" class="active">ต้นฉบับ</button><button data-layer="translation">คำแปลไทย</button></div>
+            </div>
+            <div id="cue-list" class="cue-list"></div>
+            <div class="pager"><button id="prev-page">← ก่อนหน้า</button><span id="page-info"></span><button id="next-page">ถัดไป →</button></div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Runtime data and downloaded model weights
+.env
+data/*
+!data/voice-profiles/
+!data/voice-profiles/**
+models--*/
+models/
+vendor/**/.git.backup/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Frontend tooling
+node_modules/
+
+# Logs and temporary files
+*.log
+*.tmp
+temp/
+
+# Local media and generated artifacts
+*.mp4
+*.mkv
+*.mov
