@@ -115,7 +115,14 @@ function renderJob() {
   $("#job-status").textContent = statusNames[job.status] || job.status;
   $("#job-status").className = `badge ${job.status}`;
   $("#job-progress").style.width = `${Number(job.progress || 0)}%`;
-  $("#job-message").textContent = job.error || job.wait_reason || `คืบหน้า ${Number(job.progress || 0).toFixed(0)}%`;
+  let message = job.error || job.wait_reason || `คืบหน้า ${Number(job.progress || 0).toFixed(0)}%`;
+  if (job.stage === "synthesizing" && job.total_cues) {
+    const done = job.completed_cues || 0;
+    const total = job.total_cues;
+    const cueNo = done < total ? done + 1 : total;
+    message = `กําลังสร้างเสียง cue ${cueNo}/${total} (${done} เสร็จ)`;
+  }
+  $("#job-message").textContent = message;
   const order = ["uploaded", "extracted", "separated", "transcribed", "translated", "synthesizing", "synthesized", "completed"];
   const current = Math.max(0, order.indexOf(job.stage));
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
@@ -125,18 +132,31 @@ function renderJob() {
 
 function renderActions(job) {
   const actions = [];
-  const active = ["queued", "running", "extracting", "separating", "transcribing", "translating", "synthesizing", "muxing", "waiting_quota"].includes(job.status);
+  const activeList = ["queued", "running", "extracting", "separating", "transcribing", "translating", "synthesizing", "muxing", "waiting_quota"];
+  const active = activeList.includes(job.status);
   if (active) actions.push(["pause", "พัก"], ["cancel", "ยกเลิก"]);
-  if (["paused", "waiting_quota"].includes(job.status)) actions.push(["resume", "ทำต่อ"]);
+  if (["paused", "waiting_quota"].includes(job.status)) actions.push(["resume", "ทําต่อ"]);
   if (["failed", "needs_review"].includes(job.status)) actions.push(["retry", "ลองต่อ"]);
   if (job.status === "reviewing_transcript") actions.push(["approve_transcript", "ยืนยัน transcript และแปลต่อ"]);
-  if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคำแปลและสร้างเสียง"]);
+  if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"]);
   if (job.status === "completed" && job.artifacts?.some((item) => item.kind === "dub_wav")) actions.push(["remux", "มิกซ์ MP4 ใหม่"]);
-  $("#actions").innerHTML = actions.map(([action, label], index) => `<button data-action="${action}" class="${index === 0 ? "primary" : "secondary"}">${label}</button>`).join("");
+  if (!active) actions.push(["delete", "ลบ"]);
+  $("#actions").innerHTML = actions.map(([action, label], index) => {
+    const cls = action === "delete" ? "danger" : index === 0 ? "primary" : "secondary";
+    return `<button data-action="${action}" class="${cls}">${label}</button>`;
+  }).join("");
   document.querySelectorAll("#actions button").forEach((button) => button.onclick = () => runAction(button.dataset.action));
 }
 
 async function runAction(action) {
+  if (action === "delete") {
+    if (!confirm("ลบงานนี้พร้อมไฟล์ผลลัพธ์ทั้งหมด? การกระทํานี้ย้อนกลับไม่ได้")) return;
+    try {
+      await api(`/api/jobs/${state.current.id}`, { method: "DELETE" });
+      toast("ลบงานแล้ว"); state.events?.close(); await loadJobs(); showCreate();
+    } catch (error) { toast(error.message, true); }
+    return;
+  }
   try {
     state.current = await api(`/api/jobs/${state.current.id}/actions`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action }) });
     renderJob(); await loadJobs();
