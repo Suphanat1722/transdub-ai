@@ -544,6 +544,7 @@ def _translate_chunk(
     saw_quota_exhausted = False
     for model in models:
         correction_errors: list[str] = []
+        db.update_job(job_id, translation_model=model)
         for attempt in range(2):
             system, contents, max_tokens = _request(
                 source, chunk, source_language, correction_errors

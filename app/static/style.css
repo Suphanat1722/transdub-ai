@@ -5,3 +5,5 @@
 .job-title .title-actions{display:flex;align-items:center;gap:10px}.delete-job{width:40px;height:40px;display:grid;place-items:center;border:0;border-radius:11px;background:#252c31;color:var(--text);font:inherit;font-size:16px;cursor:pointer}.delete-job:hover{background:#3a2020;color:#ffacac}
 
 .translate-progress{margin-top:10px}.translate-progress .progress{margin-top:0}.translate-hint{color:var(--muted);font-size:12px;margin:8px 0 0}
+
+.cue-btns{display:flex;gap:6px;align-items:center}.cue-foot{flex-wrap:wrap}.cue-play,.cue-regenerate{flex:none;width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:8px;background:#20262a;color:var(--text);font-size:13px;cursor:pointer}.cue-play:hover{background:#25452f;color:#c9ffd8}.cue-regenerate:hover{background:#372b1d;color:#ffd18a}

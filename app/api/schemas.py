@@ -35,6 +35,8 @@ class JobStatusResponse(BaseModel):
 
 class JobActionRequest(BaseModel):
     action: str
+    cue_id: int | None = None
+    nfe_step: int | None = None
 
     @field_validator("action")
     @classmethod
@@ -47,9 +49,17 @@ class JobActionRequest(BaseModel):
             "approve_transcript",
             "approve_translation",
             "remux",
+            "regenerate_cue",
         }
         if value not in allowed:
             raise ValueError("action ไม่รองรับ")
+        return value
+
+    @field_validator("nfe_step")
+    @classmethod
+    def supported_nfe(cls, value: int | None) -> int | None:
+        if value is not None and value not in {16, 32}:
+            raise ValueError("nfe_step ต้องเป็น 16 หรือ 32")
         return value
 
 

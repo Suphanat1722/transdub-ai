@@ -29,6 +29,7 @@ vendor/**/.git.backup/
 # Editors and operating systems
 .idea/
 .vscode/
+.zcode/
 .DS_Store
 Thumbs.db
 desktop.ini

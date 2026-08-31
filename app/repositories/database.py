@@ -931,10 +931,12 @@ def create_video_job(
     pause_after_translation: bool,
     background_volume: float,
     voice_volume: float,
+    nfe_step: int | None = None,
 ) -> dict:
     now = utc_now()
     seed = int.from_bytes(uuid.uuid4().bytes[:4], "big") & 0x7FFFFFFF
     settings = get_settings()
+    effective_nfe = nfe_step if nfe_step is not None else settings["nfe_step"]
     with connect() as conn:
         conn.execute(
             """INSERT INTO jobs(
@@ -954,7 +956,7 @@ def create_video_job(
                 now,
                 now,
                 voice_profile_id,
-                settings["nfe_step"],
+                effective_nfe,
                 settings["inference_speed"],
                 settings["max_start_delay_ms"],
                 seed,

@@ -105,7 +105,7 @@ async function openJob(id) {
   if (!["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) {
     state.events = new EventSource(`/api/jobs/${id}/events`);
     state.events.onmessage = async (event) => {
-      state.current = JSON.parse(event.data); renderJob(); await loadJobs();
+      state.current = JSON.parse(event.data); renderJob(); await loadJobs(); await loadCues();
       if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) state.events.close();
     };
   }
@@ -144,6 +144,7 @@ function renderTranslationProgress(job) {
   $("#translate-progress-bar").style.width = `${tp.progress}%`;
   const current = tp.current_chunk || 0;
   let hint = `แปลช่วง ${current}/${tp.chunks_total}`;
+  if (job.translation_model) hint += ` · ใช้ ${job.translation_model}`;
   if (tp.chunks_failed > 0) hint += ` · พลาด ${tp.chunks_failed} ช่วง`;
   if (job.status === "waiting_quota") hint += " · รอ quota อยู่";
   $("#translate-hint").textContent = hint;
@@ -199,12 +200,39 @@ async function loadCues() {
     <article class="cue" data-id="${cue.id}">
       <div class="cue-meta"><b>#${cue.position}</b><input class="start" type="number" value="${cue.start_ms}" min="0"><span>→</span><input class="end" type="number" value="${cue.end_ms}" min="1"><small>ms</small></div>
       <textarea>${escapeHtml(cue.text)}</textarea>
-      <div class="cue-foot"><span>${(cue.warnings || []).map(escapeHtml).join(" · ")}</span><button class="save-cue">บันทึก</button></div>
+      <div class="cue-foot"><span>${(cue.warnings || []).map(escapeHtml).join(" · ")}</span>
+        <span class="cue-btns">
+          ${cue.status === "completed" && cue.audio_path ? `<button class="cue-play" title="ฟังเสียง">▶</button>` : ""}
+          ${state.layer === "translation" ? `<button class="cue-regenerate" title="สร้างเสียงใหม่">↻</button>` : ""}
+          <button class="save-cue">บันทึก</button>
+        </span>
+      </div>
     </article>`).join("") : '<p class="empty">ขั้นนี้ยังไม่มี cue</p>';
   const page = Math.floor(data.offset / data.limit) + 1, pages = Math.max(1, Math.ceil(data.total / data.limit));
   $("#page-info").textContent = `หน้า ${page}/${pages} · ${data.total} cues`;
   $("#prev-page").disabled = data.offset === 0; $("#next-page").disabled = data.offset + data.limit >= data.total;
   document.querySelectorAll(".save-cue").forEach((button) => button.onclick = () => saveCue(button.closest(".cue")));
+  document.querySelectorAll(".cue-play").forEach((button) => button.onclick = () => playCueAudio(button.closest(".cue")));
+  document.querySelectorAll(".cue-regenerate").forEach((button) => button.onclick = () => regenerateCue(button.closest(".cue")));
+}
+
+async function playCueAudio(element) {
+  const id = element.dataset.id;
+  const url = `/api/jobs/${state.current.id}/cues/${id}/audio`;
+  const audio = new Audio(url);
+  audio.play().catch(() => toast("ไม่สามารถเล่นเสียงได้", true));
+}
+
+async function regenerateCue(element) {
+  const id = element.dataset.id;
+  if (!confirm("สร้างเสียงของ cue นี้ใหม่?")) return;
+  try {
+    await api(`/api/jobs/${state.current.id}/actions`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ action: "regenerate_cue", cue_id: Number(id) }),
+    });
+    toast("กําลังสร้างเสียง cue ใหม่"); await openJob(state.current.id);
+  } catch (error) { toast(error.message, true); }
 }
 
 async function saveCue(element) {

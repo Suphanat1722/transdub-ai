@@ -71,10 +71,13 @@ async def create_job(
     pause_after_translation: bool = Form(False),
     background_volume: float = Form(100),
     voice_volume: float = Form(100),
+    nfe_step: int = Form(32),
 ) -> dict:
     require_profile(voice_profile_id)
     if not 0 <= background_volume <= 150 or not 0 <= voice_volume <= 150:
         raise HTTPException(422, "ระดับเสียงต้องอยู่ระหว่าง 0–150 เปอร์เซ็นต์")
+    if nfe_step not in {16, 32}:
+        raise HTTPException(422, "nfe_step ต้องเป็น 16 หรือ 32")
     safe_name = Path(video.filename or "video.mp4").name
     suffix = Path(safe_name).suffix.lower()[:12] or ".video"
     job_id = str(uuid.uuid4())
@@ -94,6 +97,7 @@ async def create_job(
             pause_after_translation=pause_after_translation,
             background_volume=background_volume,
             voice_volume=voice_volume,
+            nfe_step=nfe_step,
         )
     except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -175,6 +179,36 @@ def action(job_id: str, request: JobActionRequest) -> dict:
             raise HTTPException(409, "ยังไม่มีเสียงพากย์พร้อม remux")
         db.delete_artifacts(job_id, {"final_video"})
         db.update_job(job_id, stage="synthesized", status="queued", output_video_path=None)
+        worker.wake()
+    elif selected == "regenerate_cue":
+        cue_id = request.cue_id
+        if cue_id is None:
+            raise HTTPException(422, "ต้องระบุ cue_id")
+        cue = db.get_cue(cue_id)
+        if not cue or cue["job_id"] != job_id:
+            raise HTTPException(404, "ไม่พบ cue")
+        if job["stage"] not in {"synthesizing", "synthesized"}:
+            raise HTTPException(409, "งานยังไม่ได้อยู่ในขั้นสร้างเสียง")
+        if request.nfe_step is not None:
+            db.update_job(job_id, nfe_step=request.nfe_step)
+        # Reset this cue so the worker regenerates it, using the (possibly new)
+        # job-level nfe_step, which also produces a fresh audio-cache key.
+        db.update_cue(
+            cue_id,
+            status="pending",
+            audio_path=None,
+            original_duration_ms=None,
+            final_duration_ms=None,
+            error=None,
+            generation_revision=int(cue.get("generation_revision") or 0) + 1,
+        )
+        db.update_job(
+            job_id,
+            stage="synthesizing",
+            status="queued" if job["status"] in TERMINAL else job["status"],
+            wait_reason=None,
+            error=None,
+        )
         worker.wake()
     return public_job(require_job(job_id, include_cues=False))
 
