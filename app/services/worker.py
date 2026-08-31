@@ -467,7 +467,7 @@ class JobWorker:
         if latest_end > int(refreshed["video_duration_ms"]) + 20:
             overflow = latest_end - int(refreshed["video_duration_ms"])
             problem_positions = [
-                str(item["position"])
+                str(item["cue"]["position"])
                 for item in timeline
                 if item["actual_end_ms"] > int(refreshed["video_duration_ms"])
             ]
