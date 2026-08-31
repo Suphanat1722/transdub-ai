@@ -20,14 +20,14 @@ def _add(table: str, column: sa.Column) -> None:
 
 
 def upgrade() -> None:
-    _add("jobs", sa.Column("max_start_delay_ms", sa.Integer(), nullable=False, server_default="1000"))
+    _add("jobs", sa.Column("max_start_delay_ms", sa.Integer(), nullable=False, server_default="2000"))
     _add("jobs", sa.Column("control_requested", sa.Text(), nullable=True))
     _add("jobs", sa.Column("current_cue_id", sa.Integer(), nullable=True))
     _add("jobs", sa.Column("active_output_revision", sa.Text(), nullable=True))
     _add("jobs", sa.Column("pipeline_revision", sa.Text(), nullable=False, server_default="legacy-v0.4.4"))
     _add("jobs", sa.Column("glossary_json", sa.Text(), nullable=False, server_default="[]"))
     _add("jobs", sa.Column("glossary_revision", sa.Integer(), nullable=False, server_default="0"))
-    _add("settings", sa.Column("max_start_delay_ms", sa.Integer(), nullable=False, server_default="1000"))
+    _add("settings", sa.Column("max_start_delay_ms", sa.Integer(), nullable=False, server_default="2000"))
     _add("cues", sa.Column("effective_seed", sa.Integer(), nullable=True))
     _add("cues", sa.Column("generation_revision", sa.Integer(), nullable=False, server_default="0"))
     _add("cues", sa.Column("inference_text", sa.Text(), nullable=True))

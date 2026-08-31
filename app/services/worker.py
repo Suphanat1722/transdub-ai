@@ -13,6 +13,8 @@ from ..core.config import (
     CACHE_DIR,
     CACHE_FORMAT_REVISION,
     JOBS_DIR,
+    MAX_END_SPEED,
+    MAX_SPEED,
     MODEL_NAME,
     MODEL_REVISION,
     PIPELINE_REVISION,
@@ -406,12 +408,22 @@ class JobWorker:
             available_ms = (
                 max(0, next_subtitle["start_ms"] - cue["start_ms"]) if next_subtitle else None
             )
-            final_ms, speed_factor, reaches_next = fit_before_next_start(raw_path, final_path, available_ms)
+            if available_ms is None:
+                # For the final cue target the end of the video so it can be
+                # squeezed (up to MAX_END_SPEED) to fit instead of overrunning.
+                video_end = int(refreshed.get("video_duration_ms") or 0)
+                available_ms = max(0, video_end - int(cue["start_ms"])) or None
+            max_speed = MAX_END_SPEED if next_subtitle is None else MAX_SPEED
+            final_ms, speed_factor, reaches_next = fit_before_next_start(
+                raw_path, final_path, available_ms, max_speed=max_speed
+            )
             warnings = list(cue.get("warnings") or json.loads(cue.get("warnings_json", "[]")))
             if quality.get("suspected_cutoff"):
                 warnings.append("ปลายเสียงอาจถูกตัดหลังสร้างครบสองรอบ")
             if reaches_next:
                 warnings.append("เสียงยังชน cue ถัดไปหลังเร่งสูงสุด")
+            elif available_ms is not None and speed_factor > 1.0:
+                warnings.append("เสียงถูกย่อ/ตัดปลายเพื่อให้พอดีก่อน cue ถัดไป")
             db.update_cue(
                 cue["id"],
                 status="completed",

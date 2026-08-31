@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.core.config import SAMPLE_RATE
+from app.core.config import MAX_END_SPEED, SAMPLE_RATE
 from app.services.audio import (
     INLINE_FILTER_LIMIT,
     _filter_complex_args,
@@ -41,8 +41,9 @@ def test_caps_collision_speed_at_1_25(tmp_path):
     write_pcm_wav(source, tone(2000))
     final_ms, speed, overlap = fit_before_next_start(source, output, 800)
     assert speed == 1.25
-    assert final_ms > 800
-    assert overlap
+    # Fastest allowed speed still overruns, so the tail is trimmed to fit:
+    assert 780 <= final_ms <= 820
+    assert not overlap
 
 
 def test_last_cue_keeps_its_natural_duration(tmp_path):
@@ -51,6 +52,18 @@ def test_last_cue_keeps_its_natural_duration(tmp_path):
     final_ms, speed, overlap = fit_before_next_start(source, output, None)
     assert 1990 <= final_ms <= 2010
     assert speed == 1.0
+    assert not overlap
+
+
+def test_final_cue_can_speed_to_1_5(tmp_path):
+    source, output = tmp_path / "raw.wav", tmp_path / "fit.wav"
+    write_pcm_wav(source, tone(3000))
+    # A long final cue with a narrow slot forces the higher 1.5 end cap.
+    final_ms, speed, overlap = fit_before_next_start(
+        source, output, 1800, max_speed=MAX_END_SPEED
+    )
+    assert speed == MAX_END_SPEED
+    assert 1700 <= final_ms <= 1900
     assert not overlap
 
 

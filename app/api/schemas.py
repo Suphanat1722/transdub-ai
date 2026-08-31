@@ -98,7 +98,7 @@ class StartRequest(BaseModel):
 class LocalSettings(BaseModel):
     nfe_step: int = 32
     inference_speed: float = Field(default=1.0, ge=0.5, le=2.0)
-    max_start_delay_ms: int = Field(default=1000, ge=0, le=5000)
+    max_start_delay_ms: int = Field(default=2000, ge=0, le=5000)
     allow_cpu: bool = True
 
     @field_validator("nfe_step")

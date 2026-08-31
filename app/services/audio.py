@@ -208,28 +208,50 @@ def choose_safer_candidate(first: dict, second: dict) -> dict:
     )
 
 
-def fit_before_next_start(source: Path, target: Path, available_ms: int | None) -> tuple[int, float, bool]:
-    """Speed up only when natural speech would reach the next cue start."""
+def fit_before_next_start(
+    source: Path,
+    target: Path,
+    available_ms: int | None,
+    max_speed: float = MAX_SPEED,
+) -> tuple[int, float, bool]:
+    """Speed up a cue to fit before the next start, trimming the tail as a last resort.
+
+    Unlike the old behaviour (which left a reach-over cue overlapping the next
+    one), if the fastest allowed speed still overruns ``available_ms`` we trim
+    the tail so the cue ends on time.  Returns ``(final_ms, speed, reached_next)``
+    where ``reached_next`` is False once the cue has been fitted.
+    """
     original_ms = wav_duration_ms(source)
     if available_ms is None or original_ms <= available_ms:
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         return original_ms, 1.0, False
     required = original_ms / available_ms if available_ms > 0 else float("inf")
-    speed = min(required, MAX_SPEED)
+    speed = min(required, max_speed)
+    final_ms = round(original_ms / speed)
+    # Trim the tail if the fastest allowed speed still overruns the slot.
+    if final_ms > available_ms:
+        trimmed = True
+        final_ms = available_ms
+    else:
+        trimmed = False
     binary = ffmpeg_path()
     if not binary:
         raise AudioError("ไม่พบ FFmpeg ใน PATH")
-    result = subprocess.run(
+    args = [
+        binary,
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        str(source),
+        "-filter:a",
+        f"atempo={speed:.8f}",
+    ]
+    if trimmed:
+        args.extend(["-t", f"{final_ms / 1000:.3f}"])
+    args.extend(
         [
-            binary,
-            "-y",
-            "-v",
-            "error",
-            "-i",
-            str(source),
-            "-filter:a",
-            f"atempo={speed:.8f}",
             "-ar",
             str(SAMPLE_RATE),
             "-ac",
@@ -237,14 +259,13 @@ def fit_before_next_start(source: Path, target: Path, available_ms: int | None) 
             "-c:a",
             "pcm_s16le",
             str(target),
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
+    result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode:
-        raise AudioError(result.stderr.strip() or "FFmpeg ปรับความเร็วไม่สำเร็จ")
-    final_ms = wav_duration_ms(target)
-    return final_ms, speed, final_ms > available_ms + 20
+        raise AudioError(result.stderr.strip() or "FFmpeg ปรับความเร็วไม่สําเร็จ")
+    measured = wav_duration_ms(target)
+    return measured, speed, measured > available_ms + 20
 
 
 def plan_timeline(cues: list[dict], max_start_delay_ms: int) -> list[dict]:
