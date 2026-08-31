@@ -483,6 +483,7 @@ class JobWorker:
                 dub_audio_path=data_relative(dub_wav),
                 warnings_json=json.dumps(warnings, ensure_ascii=False),
                 wait_reason="แก้ cue ช่วงท้ายก่อนประกอบวิดีโอ",
+                error=None,
             )
             return
         db.update_job(
