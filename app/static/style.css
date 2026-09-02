@@ -15,3 +15,7 @@
 #translation-tools .secondary{justify-self:start}
 #translation-tools label{font-weight:700;color:var(--text)}
 #translation-tools .prompt-box,#translation-tools .srt-import{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1113}
+
+#srt-upload-box .srt-mode{display:grid;gap:8px;margin-top:10px;text-align:left}
+#srt-upload-box .srt-mode label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)}
+#srt-upload-box .srt-mode input[type=radio]{display:inline-block;width:auto;margin:0;accent-color:var(--green)}

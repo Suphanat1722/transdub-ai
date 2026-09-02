@@ -276,12 +276,19 @@ async function saveCue(element) {
 }
 
 $("#job-form").onsubmit = (event) => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); const request = new XMLHttpRequest();
+  event.preventDefault();
+  // Guard: if SRT mode is on but no file selected, tell the user instead of
+  // silently doing nothing.
+  if ($("#use-srt").checked && !$("#srt-file").files.length) {
+    toast("กรุณาเลือกไฟล์ SRT ก่อนเริ่มพากย์", true);
+    return;
+  }
+  const form = new FormData(event.currentTarget); const request = new XMLHttpRequest();
   $("#upload-progress").hidden = false;
   request.open("POST", "/api/jobs"); request.responseType = "json";
   request.upload.onprogress = (e) => { if (e.lengthComputable) $("#upload-progress span").style.width = `${e.loaded / e.total * 100}%`; };
-  request.onload = async () => { if (request.status < 300) { await loadJobs(); openJob(request.response.id); } else toast(request.response?.detail || "สร้างงานไม่สำเร็จ", true); $("#upload-progress").hidden = true; };
-  request.onerror = () => toast("อัปโหลดไม่สำเร็จ", true); request.send(form);
+  request.onload = async () => { if (request.status < 300) { await loadJobs(); openJob(request.response.id); } else toast(request.response?.detail || "สร้างงานไม่สําเร็จ", true); $("#upload-progress").hidden = true; };
+  request.onerror = () => toast("อัปโหลดไม่สําเร็จ", true); request.send(form);
 };
 
 $("#video").onchange = (event) => { const file = event.target.files[0]; $("#video-name").textContent = file ? `${file.name} · ${formatSize(file.size)}` : "รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB"; };
@@ -298,13 +305,23 @@ $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };
 $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
 $("#translation-prompt").addEventListener("input", () => { $("#translation-prompt").dataset.touched = "1"; });
 $("#save-prompt").onclick = savePrompt;
-$("#use-srt").addEventListener("change", () => {
+$("#use-srt").addEventListener("change", updateSrtMode);
+$("#srt-file").addEventListener("change", () => {
+  const file = $("#srt-file").files[0];
+  $("#srt-file-name").textContent = file ? file.name : "ยังไม่ได้เลือกไฟล์";
+});
+document.querySelectorAll('input[name="srt_mode"]').forEach((r) => r.addEventListener("change", updateSrtMode));
+
+function updateSrtMode() {
   const on = $("#use-srt").checked;
   $("#srt-upload-box").hidden = !on;
   $("#srt-file").required = on;
-  // When importing our own SRT, the review pauses are not needed.
-  document.querySelectorAll('input[name="pause_after_transcription"], input[name="pause_after_translation"]').forEach((cb) => { cb.checked = !on; cb.disabled = on; });
-});
+  if (!on) return;
+  const translated = document.querySelector('input[name="srt_mode"]:checked').value === "translated";
+  // Translated-SRT mode skips all review pauses; pending mode keeps them
+  // (the Gemini translation still needs the review step).
+  document.querySelectorAll('input[name="pause_after_transcription"], input[name="pause_after_translation"]').forEach((cb) => { cb.checked = !translated; cb.disabled = translated; });
+}
 
 $("#pick-folder-btn").onclick = async () => {
   try {

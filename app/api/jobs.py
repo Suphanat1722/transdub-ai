@@ -106,6 +106,7 @@ async def create_job(
     output_dir: str = Form(""),
     translation_prompt: str = Form(""),
     srt: UploadFile | None = File(None),
+    srt_mode: str = Form("translated"),
 ) -> dict:
     if not 0 <= background_volume <= 150 or not 0 <= voice_volume <= 150:
         raise HTTPException(422, "ระดับเสียงต้องอยู่ระหว่าง 0–150 เปอร์เซ็นต์")
@@ -115,7 +116,8 @@ async def create_job(
     if export_dir and not os.path.isdir(export_dir):
         raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {export_dir}")
 
-    # Imported-SRT path: skip ASR transcription and Gemini translation entirely.
+    # Imported-SRT path: decide whether the SRT is already translated (skip ASR
+# and Gemini) or still needs Gemini translation before synthesis.
     mode = "normal"
     imported_cues: list[dict] = []
     if srt is not None:
@@ -136,9 +138,9 @@ async def create_job(
             }
             for cue in parsed.cues
         ]
-        mode = "import"
         if not imported_cues:
             raise HTTPException(422, "ไฟล์ SRT ไม่มีข้อความ")
+        mode = "import" if srt_mode == "translated" else "import_pending"
 
     safe_name = Path(video.filename or "video.mp4").name
     suffix = Path(safe_name).suffix.lower()[:12] or ".video"
@@ -165,10 +167,13 @@ async def create_job(
             translation_prompt=translation_prompt.strip() or None,
         )
         if mode == "import":
-            # Transcript == imported SRT; store as source cues, and as the
-            # translation layer too (used directly for synthesis).
+            # Translated SRT: source == translation layer, use directly.
             db.replace_source_cues(job_id, imported_cues)
             db.replace_translation_cues(job_id, imported_cues)
+        elif mode == "import_pending":
+            # Not-yet-translated SRT: use it as the source (transcript) so the
+            # Gemini translation step runs before synthesis.
+            db.replace_source_cues(job_id, imported_cues)
     except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise

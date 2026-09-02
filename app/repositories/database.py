@@ -890,7 +890,7 @@ def create_video_job(
     settings = get_settings()
     effective_voice = voice or settings["voice"]
     effective_rate = int(tts_rate if tts_rate is not None else settings.get("tts_rate") or 0)
-    effective_mode = mode if mode in {"normal", "import"} else "normal"
+    effective_mode = mode if mode in {"normal", "import", "import_pending"} else "normal"
     with connect() as conn:
         conn.execute(
             """INSERT INTO jobs(

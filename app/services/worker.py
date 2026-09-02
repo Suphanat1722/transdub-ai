@@ -162,9 +162,12 @@ class JobWorker:
             self._separate(job)
         elif stage == "separated":
             if job.get("mode") == "import":
-                # Imported SRT path: transcription and Gemini translation were
-                # skipped at creation; cues are already the translation layer.
+                # Translated SRT: transcription and Gemini translation skipped.
                 self._skip_to_synthesize(job)
+            elif job.get("mode") == "import_pending":
+                # Not-yet-translated SRT: source cues are already populated from
+                # the file; go straight to Gemini translation (skip ASR).
+                self._import_pending_to_translate(job)
             else:
                 self._transcribe(job)
         elif stage == "transcribed":
@@ -235,6 +238,20 @@ class JobWorker:
             stage="translated",
             progress=55,
             translation_approved=1,
+            wait_reason=None,
+            error=None,
+        )
+
+    def _import_pending_to_translate(self, job: dict) -> None:
+        """Move import-pending jobs (source from SRT) to the Gemini translate step."""
+        job_id = job["id"]
+        # Source cues come from the imported SRT; skip ASR, go to translation.
+        db.update_job(
+            job_id,
+            status="queued",
+            stage="transcribed",
+            progress=45,
+            transcript_approved=1,
             wait_reason=None,
             error=None,
         )

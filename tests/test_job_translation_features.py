@@ -45,6 +45,30 @@ def test_create_job_with_srt_sets_import_mode_and_cues(monkeypatch, tmp_path: Pa
         assert job["cues"][0]["text"] == "สวัสดี"
 
 
+def test_create_job_with_pending_srt_sets_import_pending(monkeypatch, tmp_path: Path) -> None:
+    _setup(monkeypatch, tmp_path)
+    srt = b"1\n00:00:00,000 --> 00:00:01,000\nHello there\n"
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/jobs",
+            data={"voice": "th-TH-NiwatNeural", "srt_mode": "pending"},
+            files={
+                "video": ("clip.mp4", b"not-probed", "video/mp4"),
+                "srt": ("src.srt", srt, "text/plain"),
+            },
+        )
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["mode"] == "import_pending"
+        assert data["status"] == "queued"
+        job_id = data["id"]
+        job = db.get_job(job_id)
+        assert job is not None
+        # Source cues come from the imported (untranslated) SRT; translation empty.
+        assert job["source_cues"][0]["text"] == "Hello there"
+        assert job["cues"] == []
+
+
 def test_create_job_without_srt_uses_normal_mode(monkeypatch, tmp_path: Path) -> None:
     _setup(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:

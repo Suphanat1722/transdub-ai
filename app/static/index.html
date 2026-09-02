@@ -64,13 +64,17 @@
               </label>
             </div>
             <div class="checks">
-              <label><input id="use-srt" type="checkbox"> ใช้ SRT ที่แปลเอง (ข้ามถอดเสียงและ Gemini แปล)</label>
+              <label><input id="use-srt" type="checkbox"> ใช้ SRT แทนการถอดเสียงจากวิดีโอ</label>
             </div>
             <div id="srt-upload-box" class="drop" hidden>
               <input id="srt-file" name="srt" type="file" accept=".srt">
               <span class="drop-icon">⤓</span>
-              <strong>เลือกไฟล์ SRT ที่แปลเอง</strong>
-              <small>ใช้เวลาจากไฟล์นี้สร้างเสียงพากย์เลย</small>
+              <strong>เลือกไฟล์ SRT</strong>
+              <small id="srt-file-name">ยังไม่ได้เลือกไฟล์</small>
+              <div class="srt-mode">
+                <label><input type="radio" name="srt_mode" value="translated" checked> SRT แปลแล้วแล้ว (ภาษาไทย) — ข้าม Gemini</label>
+                <label><input type="radio" name="srt_mode" value="pending"> SRT ยังไม่แปล — ให้ Gemini แปลก่อน</label>
+              </div>
             </div>
             <div class="checks">
               <label><input name="pause_after_transcription" type="checkbox" checked> พักเพื่อตรวจ transcript</label>
