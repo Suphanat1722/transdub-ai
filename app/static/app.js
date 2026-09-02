@@ -145,13 +145,13 @@ function renderJob() {
 }
 
 function renderTranslationTools(job) {
+  // Always show the import/prompt tools so the user can bring their own SRT
+  // or adjust the translation prompt at any point before speech generation.
   const tools = $("#translation-tools");
-  tools.hidden = !(job.status === "reviewing_translation");
-  if (!tools.hidden) {
-    const box = $("#translation-prompt");
-    // Only populate from the job when the user has not started editing.
-    if (!box.dataset.touched) box.value = job.translation_prompt || "";
-  }
+  tools.hidden = false;
+  const box = $("#translation-prompt");
+  // Only populate from the job when the user has not started editing.
+  if (!box.dataset.touched) box.value = job.translation_prompt || "";
 }
 
 async function savePrompt() {

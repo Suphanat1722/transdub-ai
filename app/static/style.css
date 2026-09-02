@@ -7,3 +7,11 @@
 .translate-progress{margin-top:10px}.translate-progress .progress{margin-top:0}.translate-hint{color:var(--muted);font-size:12px;margin:8px 0 0}
 
 .cue-btns{display:flex;gap:6px;align-items:center}.cue-foot{flex-wrap:wrap}.cue-play,.cue-regenerate{flex:none;width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:8px;background:#20262a;color:var(--text);font-size:13px;cursor:pointer}.cue-play:hover{background:#25452f;color:#c9ffd8}.cue-regenerate:hover{background:#372b1d;color:#ffd18a}
+
+#translation-tools .card-head{margin-bottom:14px}
+#translation-tools .prompt-box,#translation-tools .srt-import{display:grid;gap:10px;margin-bottom:16px}
+#translation-tools textarea{min-height:120px}
+#translation-tools .srt-import input[type=file]{padding:8px;background:#0e1113}
+#translation-tools .secondary{justify-self:start}
+#translation-tools label{font-weight:700;color:var(--text)}
+#translation-tools .prompt-box,#translation-tools .srt-import{padding:14px;border:1px solid var(--line);border-radius:12px;background:#0e1113}
