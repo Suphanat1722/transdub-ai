@@ -145,13 +145,12 @@ function renderJob() {
 }
 
 function renderTranslationTools(job) {
-  // Always show the import/prompt tools so the user can bring their own SRT
-  // or adjust the translation prompt at any point before speech generation.
+  // Show the Gemini system-prompt box only while reviewing the transcript in
+  // the normal (Gemini) mode, so the user sets the prompt before translating.
   const tools = $("#translation-tools");
-  tools.hidden = false;
+  tools.hidden = !(job.status === "reviewing_transcript" && job.mode !== "import");
   const box = $("#translation-prompt");
-  // Only populate from the job when the user has not started editing.
-  if (!box.dataset.touched) box.value = job.translation_prompt || "";
+  if (!tools.hidden && !box.dataset.touched) box.value = job.translation_prompt || "";
 }
 
 async function savePrompt() {
@@ -161,18 +160,6 @@ async function savePrompt() {
       method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ prompt: value }),
     });
     toast("บันทึก prompt แล้ว");
-  } catch (error) { toast(error.message, true); }
-}
-
-async function importSrt() {
-  const input = $("#translation-srt");
-  const file = input.files && input.files[0];
-  if (!file) { toast("เลือกไฟล์ SRT ก่อน", true); return; }
-  const form = new FormData();
-  form.append("file", file);
-  try {
-    state.current = await api(`/api/jobs/${state.current.id}/translation-srt`, { method: "POST", body: form });
-    toast("นำเข้า SRT แล้ว รอตรวจคำแปล"); await openJob(state.current.id);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -312,6 +299,12 @@ $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };
 $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
 $("#translation-prompt").addEventListener("input", () => { $("#translation-prompt").dataset.touched = "1"; });
 $("#save-prompt").onclick = savePrompt;
-$("#import-srt-btn").onclick = importSrt;
+$("#use-srt").addEventListener("change", () => {
+  const on = $("#use-srt").checked;
+  $("#srt-upload-box").hidden = !on;
+  $("#srt-file").required = on;
+  // When importing our own SRT, the review pauses are not needed.
+  document.querySelectorAll('input[name="pause_after_transcription"], input[name="pause_after_translation"]').forEach((cb) => { cb.checked = !on; cb.disabled = on; });
+});
 
 await Promise.all([loadHealth(), loadVoices(), loadJobs()]);

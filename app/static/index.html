@@ -63,6 +63,15 @@
               </label>
             </div>
             <div class="checks">
+              <label><input id="use-srt" type="checkbox"> ใช้ SRT ที่แปลเอง (ข้ามถอดเสียงและ Gemini แปล)</label>
+            </div>
+            <div id="srt-upload-box" class="drop" hidden>
+              <input id="srt-file" name="srt" type="file" accept=".srt" required>
+              <span class="drop-icon">⤓</span>
+              <strong>เลือกไฟล์ SRT ที่แปลเอง</strong>
+              <small>ใช้เวลาจากไฟล์นี้สร้างเสียงพากย์เลย</small>
+            </div>
+            <div class="checks">
               <label><input name="pause_after_transcription" type="checkbox" checked> พักเพื่อตรวจ transcript</label>
               <label><input name="pause_after_translation" type="checkbox" checked> พักเพื่อตรวจคําแปล</label>
             </div>
@@ -89,17 +98,12 @@
           <div id="job-warnings" class="warning-list"></div>
           <div id="actions" class="actions"></div>
 
-          <section class="card" id="translation-tools" hidden>
-            <div class="card-head"><h3>เครื่องมือคำแปล</h3></div>
+<section class="card" id="translation-tools" hidden>
+            <div class="card-head"><h3>Prompt สําหรับแปล (ส่งเป็น system prompt ให้ Gemini)</h3></div>
             <div class="prompt-box">
-              <label>Prompt สำหรับให้ Gemini แปล (ประจำงานนี้)</label>
+              <label>ใส่สิ่งที่อยากให้ Gemini ทําในการแปล</label>
               <textarea id="translation-prompt" rows="6" placeholder="ว่าง = ใช้ค่าเริ่มต้นระบบ"></textarea>
               <button class="secondary" id="save-prompt">บันทึก prompt</button>
-            </div>
-            <div class="srt-import">
-              <label>นำเข้าไฟล์ SRT ที่แปลเอง (แทนที่คำแปลไทย แล้วรอตรวจ)</label>
-              <input id="translation-srt" type="file" accept=".srt" name="file">
-              <button class="secondary" id="import-srt-btn">นำเข้า SRT</button>
             </div>
           </section>
 

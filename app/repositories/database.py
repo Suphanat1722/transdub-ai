@@ -664,6 +664,7 @@ def update_job(job_id: str, **fields) -> None:
         "glossary_json",
         "glossary_revision",
         "translation_prompt",
+        "mode",
         "source_path",
         "original_audio_path",
         "background_path",
@@ -881,12 +882,15 @@ def create_video_job(
     voice: str | None = None,
     tts_rate: int = 0,
     output_dir: str | None = None,
+    mode: str = "normal",
+    translation_prompt: str | None = None,
 ) -> dict:
     now = utc_now()
     seed = int.from_bytes(uuid.uuid4().bytes[:4], "big") & 0x7FFFFFFF
     settings = get_settings()
     effective_voice = voice or settings["voice"]
     effective_rate = int(tts_rate if tts_rate is not None else settings.get("tts_rate") or 0)
+    effective_mode = mode if mode in {"normal", "import"} else "normal"
     with connect() as conn:
         conn.execute(
             """INSERT INTO jobs(
@@ -894,8 +898,8 @@ def create_video_job(
                 voice,tts_rate,max_start_delay_ms,seed,engine,
                 pipeline_revision,source_path,source_language,target_language,
                 pause_after_transcription,pause_after_translation,background_volume,voice_volume,
-                stage,progress,output_dir
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?)""",
+                stage,progress,output_dir,mode,translation_prompt
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id,
                 filename,
@@ -920,6 +924,8 @@ def create_video_job(
                 "uploaded",
                 0,
                 output_dir or None,
+                effective_mode,
+                (translation_prompt or "").strip() or None,
             ),
         )
     created = get_job(job_id, include_cues=False)

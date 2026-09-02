@@ -161,7 +161,12 @@ class JobWorker:
         elif stage == "extracted":
             self._separate(job)
         elif stage == "separated":
-            self._transcribe(job)
+            if job.get("mode") == "import":
+                # Imported SRT path: transcription and Gemini translation were
+                # skipped at creation; cues are already the translation layer.
+                self._skip_to_synthesize(job)
+            else:
+                self._transcribe(job)
         elif stage == "transcribed":
             if job.get("pause_after_transcription") and not job.get("transcript_approved"):
                 db.update_job(job_id, status="reviewing_transcript", progress=45)
@@ -218,6 +223,20 @@ class JobWorker:
             stage="separated",
             progress=25,
             background_path=data_relative(background),
+        )
+
+    def _skip_to_synthesize(self, job: dict) -> None:
+        """Jump straight to synthesis for imported-SRT jobs (no ASR/Gemini)."""
+        job_id = job["id"]
+        # Cues were already populated as the translation layer at creation.
+        db.update_job(
+            job_id,
+            status="queued",
+            stage="translated",
+            progress=55,
+            translation_approved=1,
+            wait_reason=None,
+            error=None,
         )
 
     def _transcribe(self, job: dict) -> None:
