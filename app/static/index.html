@@ -31,7 +31,7 @@
       <section class="workspace">
         <div id="create-panel">
           <h2>สร้างงานพากย์</h2>
-          <form id="job-form">
+<form id="job-form">
             <label class="drop" id="video-drop">
               <input id="video" name="video" type="file" accept="video/*,.mkv,.mov,.webm" required>
               <span class="drop-icon">▶</span>
@@ -39,8 +39,8 @@
               <small id="video-name">รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB</small>
             </label>
             <div class="grid two">
-              <label>โปรไฟล์เสียง
-                <select id="voice-profile" name="voice_profile_id" required></select>
+              <label>เสียงพากย์ (Edge TTS)
+                <select id="voice-select" name="voice" required></select>
               </label>
               <label>ภาษาต้นฉบับ
                 <input name="source_language" value="auto" placeholder="auto หรือ en-US">
@@ -55,30 +55,20 @@
               </label>
             </div>
             <div class="grid two">
-              <label>คุณภาพเสียง (step)
-                <select name="nfe_step">
-                  <option value="32" selected>32 (คุณภาพดีขึ้น)</option>
-                  <option value="16">16 (เร็วกว่า)</option>
-                </select>
+              <label>อัตราการพูด <output id="tts-rate-value">0%</output>
+                <input name="tts_rate" type="range" min="-50" max="50" value="0">
+              </label>
+              <label>โฟลเดอร์ส่งออกวิดีโอ
+                <input name="output_dir" placeholder="ว่าง = ใช้โฟลเดอร์เดียวกับวิดีโอต้นฉบับ">
               </label>
             </div>
             <div class="checks">
-              <label><input name="pause_after_transcription" type="checkbox"> พักเพื่อตรวจ transcript</label>
-              <label><input name="pause_after_translation" type="checkbox"> พักเพื่อตรวจคำแปล</label>
+              <label><input name="pause_after_transcription" type="checkbox" checked> พักเพื่อตรวจ transcript</label>
+              <label><input name="pause_after_translation" type="checkbox" checked> พักเพื่อตรวจคําแปล</label>
             </div>
             <button class="primary wide" type="submit">เริ่มพากย์วิดีโอ</button>
             <div id="upload-progress" class="upload-progress" hidden><span></span></div>
           </form>
-
-          <details class="profile-box">
-            <summary>สร้างโปรไฟล์เสียงใหม่</summary>
-            <form id="profile-form" class="profile-form">
-              <input name="name" placeholder="ชื่อโปรไฟล์" maxlength="80" required>
-              <textarea name="transcript" placeholder="ข้อความที่พูดในไฟล์เสียง ต้องตรงทุกคำ" required></textarea>
-              <input name="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" required>
-              <button class="secondary" type="submit">สร้างโปรไฟล์</button>
-            </form>
-          </details>
         </div>
 
         <div id="job-panel" hidden>

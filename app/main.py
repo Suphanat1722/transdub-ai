@@ -5,25 +5,22 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .api import health, jobs, profiles, settings
+from .api import health, jobs, settings, voices
 from .core.config import STATIC_DIR, ensure_directories
 from .core.logging import configure_logging
 from .repositories import database
-from .services.inference import inference_service
 from .services.worker import worker
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     ensure_directories()
     database.init_db()
-    inference_service.start()
     worker.start()
     yield
     worker.stop()
-    inference_service.stop()
 
 
 def create_app() -> FastAPI:
@@ -44,7 +41,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     application.include_router(health.router)
-    application.include_router(profiles.router)
+    application.include_router(voices.router)
     application.include_router(jobs.router)
     application.include_router(settings.router)
     application.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

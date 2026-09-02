@@ -3,35 +3,33 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import shutil
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from ..core.config import (
-    AUTOMATIC_DURATION_MULTIPLIERS,
     CACHE_DIR,
     CACHE_FORMAT_REVISION,
+    EDGE_TTS_DEFAULT_VOICE,
     JOBS_DIR,
-    MAX_END_SPEED,
     MAX_SPEED,
-    MODEL_NAME,
-    MODEL_REVISION,
+    MAX_TTS_RATE,
     PIPELINE_REVISION,
+    RATE_STEP,
     data_relative,
     resolve_data_path,
 )
 from ..repositories import database as db
 from .audio import (
-    analyze_audio_tail,
     assemble,
-    choose_safer_candidate,
     fit_before_next_start,
     wav_duration_ms,
     write_report,
 )
-from .gpu import GPU_LOCK
-from .inference import inference_service
+from .edge_tts_synth import synth_cue
 from .media import (
     MediaError,
     create_background_stem,
@@ -39,21 +37,27 @@ from .media import (
     mix_output,
     probe_media,
 )
-from .speech_generation import apply_glossary
 from .transcription import QuotaWait, transcribe
 from .translation import TranslationError, serialize_srt, translate
 
 logger = logging.getLogger(__name__)
 
 
-def derive_effective_seed(job_seed: int, position: int, generation_revision: int) -> int:
-    digest = hashlib.sha256(f"{job_seed}:{position}:{generation_revision}".encode()).digest()
-    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+def apply_glossary(text: str, glossary: list[dict[str, str]]) -> str:
+    """Rewrite only explicit project terms, so Edge TTS reads them aloud correctly."""
+    result = text
+    for rule in sorted(glossary, key=lambda item: len(item["source"]), reverse=True):
+        source, spoken = rule["source"], rule["spoken"]
+        if source.isalnum():
+            spoken_escaped = spoken.replace("\\", r"\\")
+            result = re.sub(rf"(?<!\w){re.escape(source)}(?!\w)", spoken_escaped, result)
+        else:
+            result = result.replace(source, spoken)
+    return result
 
 
 class JobWorker:
-    def __init__(self, inference=inference_service) -> None:
-        self.inference = inference
+    def __init__(self) -> None:
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -283,21 +287,10 @@ class JobWorker:
 
     def _synthesize(self, job: dict) -> None:
         job_id = job["id"]
-        if not job.get("voice_profile_id"):
-            raise RuntimeError("ยังไม่ได้เลือกโปรไฟล์เสียง")
         cue = db.next_cue(job_id)
         if cue is None:
             self._assemble_dub(job)
             return
-        profile = db.get_voice_profile(job["voice_profile_id"])
-        if not profile:
-            raise RuntimeError("ไม่พบโปรไฟล์เสียงอ้างอิง")
-        model = self.inference.status()
-        if model.get("state") != "ready":
-            raise QuotaWait(
-                model.get("error") or "กำลังโหลด JaiTTS",
-                datetime.now(UTC) + timedelta(seconds=5),
-            )
         db.update_job(
             job_id,
             status="synthesizing",
@@ -305,7 +298,7 @@ class JobWorker:
             current_cue_id=cue["id"],
             wait_reason=None,
         )
-        self._generate_cue(job, cue, profile)
+        self._generate_cue(job, cue)
         counts = db.cue_counts(job_id)
         total = sum(counts.values()) or 1
         progress = 55 + (counts.get("completed", 0) / total) * 35
@@ -318,133 +311,119 @@ class JobWorker:
                 progress=round(progress, 1),
             )
 
-    def _generate_cue(self, job: dict, cue: dict, profile: dict) -> None:
+    def _generate_cue(self, job: dict, cue: dict) -> None:
+        """Synthesize one cue on the Edge TTS voice and fit it into the timeline.
+
+        Edge TTS rate is raised in steps until the clip fits its slot without
+        cutting any words.  If the highest rate still overruns, the natural
+        (full) clip is kept and flagged so the assembly stage can stop at
+        ``needs_review`` instead of silently truncating the last words.
+        """
         job_id = job["id"]
         inference_text = apply_glossary(cue["text"], job.get("glossary", []))
+        voice = job.get("voice") or EDGE_TTS_DEFAULT_VOICE
+        base_rate = int(job.get("tts_rate") or 0)
         revision = int(cue.get("generation_revision") or 0)
-        seed = derive_effective_seed(int(job["seed"]), int(cue["position"]), revision)
-        cache_key = hashlib.sha256(
-            "\0".join(
-                (
-                    CACHE_FORMAT_REVISION,
-                    MODEL_NAME,
-                    MODEL_REVISION,
-                    profile["audio_hash"],
-                    profile["transcript"],
-                    inference_text,
-                    str(seed),
-                    str(job["nfe_step"]),
-                    str(job["inference_speed"]),
-                )
-            ).encode()
-        ).hexdigest()
         job_dir = JOBS_DIR / job_id
         raw_path = job_dir / "cues" / f"{cue['position']:05d}-raw.wav"
         final_path = job_dir / "cues" / f"{cue['position']:05d}.wav"
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         attempts = int(cue["attempts"]) + 1
+        started = time.monotonic()
+
+        # Retrieve the slot this cue must fit into before synthesizing.
+        refreshed = db.get_job(job_id)
+        assert refreshed is not None
+        next_subtitle = next(
+            (item for item in refreshed["cues"] if item["position"] == cue["position"] + 1),
+            None,
+        )
+        available_ms = (
+            max(0, next_subtitle["start_ms"] - cue["start_ms"]) if next_subtitle else None
+        )
+        if available_ms is None:
+            video_end = int(refreshed.get("video_duration_ms") or 0)
+            available_ms = max(0, video_end - int(cue["start_ms"])) or None
+        reached_next = False
+
         db.update_cue(
             cue["id"],
             status="processing",
             attempts=attempts,
-            effective_seed=seed,
             inference_text=inference_text,
-            cache_key=cache_key,
             error=None,
         )
-        started = time.monotonic()
         try:
-            cached = db.cache_get(cache_key)
-            passes = 0
-            selected_multiplier = AUTOMATIC_DURATION_MULTIPLIERS[0]
-            quality: dict = {}
-            if cached:
-                shutil.copy2(cached["path"], raw_path)
-                original_ms = int(cached["duration_ms"])
-                quality = cached.get("quality", {})
-                passes = int(quality.get("generation_passes", 0))
-                selected_multiplier = float(quality.get("duration_multiplier", selected_multiplier))
+            # Iterate rate upward (base, +10, +20 ... +MAX) until the clip fits.
+            rate = base_rate
+            original_ms = 0
+            overrun = False
+            while rate <= MAX_TTS_RATE:
+                cache_key = hashlib.sha256(
+                    "\0".join(
+                        (CACHE_FORMAT_REVISION, voice, str(rate), inference_text, str(revision))
+                    ).encode()
+                ).hexdigest()
+                cached = db.cache_get(cache_key)
+                if cached:
+                    shutil.copy2(cached["path"], raw_path)
+                    original_ms = int(cached["duration_ms"])
+                else:
+                    original_ms = synth_cue(inference_text, voice, rate, raw_path)
+                    cache_path = CACHE_DIR / f"{cache_key}.wav"
+                    shutil.copy2(raw_path, cache_path)
+                    db.cache_put(cache_key, str(cache_path), original_ms, {})
+                db.update_cue(cue["id"], cache_key=cache_key)
+                if available_ms is None or original_ms <= available_ms:
+                    break
+                rate += RATE_STEP
             else:
-                candidates: list[dict] = []
-                for pass_index, multiplier in enumerate(AUTOMATIC_DURATION_MULTIPLIERS, 1):
-                    candidate = raw_path.with_name(f"{raw_path.stem}-pass{pass_index}.wav")
-                    with GPU_LOCK:
-                        self.inference.generate(
-                            text=inference_text,
-                            reference_audio=str(resolve_data_path(profile["audio_path"])),
-                            reference_text=profile["transcript"],
-                            output_file=str(candidate),
-                            nfe_step=job["nfe_step"],
-                            speed=job["inference_speed"],
-                            seed=seed,
-                            duration_multiplier=multiplier,
-                        )
-                    metrics = analyze_audio_tail(candidate)
-                    candidates.append({"path": candidate, "metrics": metrics, "multiplier": multiplier})
-                    passes = pass_index
-                    if not metrics["suspected_cutoff"]:
-                        break
-                selected = candidates[0] if len(candidates) == 1 else choose_safer_candidate(*candidates[:2])
-                selected_multiplier = float(selected["multiplier"])
-                quality = {
-                    **selected["metrics"],
-                    "generation_passes": passes,
-                    "duration_multiplier": selected_multiplier,
-                }
-                shutil.copy2(selected["path"], raw_path)
-                for candidate in candidates:
-                    candidate["path"].unlink(missing_ok=True)
-                original_ms = wav_duration_ms(raw_path)
-                cache_path = CACHE_DIR / f"{cache_key}.wav"
-                shutil.copy2(raw_path, cache_path)
-                db.cache_put(cache_key, str(cache_path), original_ms, quality)
+                overrun = True  # hit the rate ceiling; keep the natural clip.
 
-            refreshed = db.get_job(job_id)
-            assert refreshed is not None
-            next_subtitle = next(
-                (item for item in refreshed["cues"] if item["position"] == cue["position"] + 1),
-                None,
-            )
-            available_ms = (
-                max(0, next_subtitle["start_ms"] - cue["start_ms"]) if next_subtitle else None
-            )
-            if available_ms is None:
-                # For the final cue target the end of the video so it can be
-                # squeezed (up to MAX_END_SPEED) to fit instead of overrunning.
-                video_end = int(refreshed.get("video_duration_ms") or 0)
-                available_ms = max(0, video_end - int(cue["start_ms"])) or None
-            max_speed = MAX_END_SPEED if next_subtitle is None else MAX_SPEED
-            final_ms, speed_factor, reaches_next = fit_before_next_start(
-                raw_path, final_path, available_ms, max_speed=max_speed
-            )
+            if not overrun:
+                # Fit by speeding up only as much as needed (never trim tails,
+                # because re-synthesis already picked a rate that fits).
+                final_ms, speed_factor, reaches_next = fit_before_next_start(
+                    raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
+                )
+                reached_next = reaches_next
+            else:
+                # Highest rate still overruns: keep the full clip (no truncation)
+                # and flag it.  Assembly later shifts later cues, or stops at
+                # needs_review if the final cue overruns the video.
+                final_ms, speed_factor, reaches_next = fit_before_next_start(
+                    raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
+                )
+                reached_next = reaches_next
+
             warnings = list(cue.get("warnings") or json.loads(cue.get("warnings_json", "[]")))
-            if quality.get("suspected_cutoff"):
-                warnings.append("ปลายเสียงอาจถูกตัดหลังสร้างครบสองรอบ")
-            if reaches_next:
+            if overrun:
+                warnings.append(
+                    "เสียงยังยาวเกินช่องเวลาแม้เร่งสุดแล้ว ตรวจและย่อข้อความ หรือลดความยาวก่อนประกอบ"
+                )
+            elif reached_next:
                 warnings.append("เสียงยังชน cue ถัดไปหลังเร่งสูงสุด")
-            elif available_ms is not None and speed_factor > 1.0:
-                warnings.append("เสียงถูกย่อ/ตัดปลายเพื่อให้พอดีก่อน cue ถัดไป")
             db.update_cue(
                 cue["id"],
                 status="completed",
                 audio_path=data_relative(final_path),
                 original_duration_ms=original_ms,
-                final_duration_ms=final_ms,
+                final_duration_ms=int(wav_duration_ms(final_path)),
                 speed_factor=speed_factor,
                 warnings_json=json.dumps(warnings, ensure_ascii=False),
-                duration_multiplier=selected_multiplier,
-                generation_passes=passes,
-                tail_metrics_json=json.dumps(quality),
                 generation_duration_ms=round((time.monotonic() - started) * 1000),
                 pipeline_revision=PIPELINE_REVISION,
                 error=None,
             )
+            # A full-length clip is kept; if a late cue overruns the video the
+            # assembly stage (plan_timeline + _assemble_dub) stops at
+            # needs_review instead of cutting words.
             raw_path.unlink(missing_ok=True)
         except Exception as exc:
-            if attempts < 3 and "out of memory" not in str(exc).lower():
+            if attempts < 3:
                 db.update_cue(cue["id"], status="pending", error=str(exc)[-1200:])
                 raise QuotaWait(
-                    f"JaiTTS ขัดข้องชั่วคราว: {exc}",
+                    f"Edge TTS ขัดข้องชั่วคราว: {exc}",
                     datetime.now(UTC) + timedelta(seconds=10 * attempts),
                 ) from exc
             db.update_cue(cue["id"], status="failed", error=str(exc)[-1200:])
@@ -525,6 +504,27 @@ class JobWorker:
         if abs(info.duration * 1000 - int(job["video_duration_ms"])) > 150:
             output.unlink(missing_ok=True)
             raise MediaError("ความยาววิดีโอผลลัพธ์ต่างจากต้นฉบับเกิน 0.15 วินาที")
+
+        # Also copy the finished video to the user-chosen export folder, or to
+        # the folder containing the source video when none was chosen.
+        exported_path: Path | None = None
+        export_dir = job.get("output_dir")
+        if export_dir:
+            local_dir = Path(export_dir)
+            if not local_dir.is_dir():
+                logger.warning("โฟลเดอร์ส่งออกไม่มีอยู่จริง: %s", local_dir)
+            else:
+                exported_path = local_dir / f"{Path(job['filename']).stem}.th-dub.mp4"
+                shutil.copy2(output, exported_path)
+        else:
+            try:
+                source_dir = resolve_data_path(job["source_path"]).parent
+            except ValueError:
+                source_dir = None
+            if source_dir and source_dir.is_dir():
+                exported_path = source_dir / f"{Path(job['filename']).stem}.th-dub.mp4"
+                shutil.copy2(output, exported_path)
+
         db.put_artifact(job_id, "final_video", output, "video/mp4")
         shutil.rmtree(job_dir / "work", ignore_errors=True)
         db.update_job(

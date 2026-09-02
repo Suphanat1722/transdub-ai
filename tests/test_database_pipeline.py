@@ -11,7 +11,6 @@ def configure_temp_data(monkeypatch, root: Path) -> None:
         "DATA_DIR": root,
         "DB_PATH": root / "app.db",
         "JOBS_DIR": root / "jobs",
-        "PROFILES_DIR": root / "voice-profiles",
         "CACHE_DIR": root / "cache",
         "IMPORTS_DIR": root / "imports",
         "LOG_DIR": root / "logs",
@@ -26,20 +25,17 @@ def configure_temp_data(monkeypatch, root: Path) -> None:
 def test_job_cues_chunks_usage_and_artifacts(monkeypatch, tmp_path: Path) -> None:
     configure_temp_data(monkeypatch, tmp_path)
     db.init_db(run_legacy_migration=False)
-    profile_audio = tmp_path / "voice-profiles" / "voice.wav"
-    profile_audio.parent.mkdir(parents=True, exist_ok=True)
-    profile_audio.write_bytes(b"wav")
-    db.create_voice_profile("voice", "Voice", "อ้างอิง", config.data_relative(profile_audio), "hash", 1000, [])
     video = tmp_path / "jobs" / "job" / "source" / "video.mp4"
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"video")
     job = db.create_video_job(
-        job_id="job", filename="video.mp4", source_path=video, voice_profile_id="voice",
+        job_id="job", filename="video.mp4", source_path=video,
         source_language="auto", pause_after_transcription=False, pause_after_translation=True,
-        background_volume=100, voice_volume=90,
+        background_volume=100, voice_volume=90, voice="th-TH-PremwadeeNeural",
     )
     assert job["engine"] == "transdub"
     assert job["pause_after_translation"] is True
+    assert job["voice"] == "th-TH-PremwadeeNeural"
     db.replace_source_cues("job", [
         {"source_index": 1, "start_ms": 0, "end_ms": 1000, "text": "Hello", "warnings": []}
     ])
@@ -96,16 +92,12 @@ def test_job_cues_chunks_usage_and_artifacts(monkeypatch, tmp_path: Path) -> Non
     assert recovered["wait_reason"] == "กู้คืนงานหลังเปิดโปรแกรมใหม่"
 
 
-def _make_job(db, config, tmp_path: Path, job_id: str, cache_key: str | None) -> None:
-    profile_audio = tmp_path / "voice-profiles" / f"{job_id}.wav"
-    profile_audio.parent.mkdir(parents=True, exist_ok=True)
-    profile_audio.write_bytes(b"wav")
-    db.create_voice_profile(job_id, job_id, "อ้างอิง", config.data_relative(profile_audio), "hash", 1000, [])
+def _make_job(db, tmp_path: Path, job_id: str, cache_key: str | None) -> None:
     video = tmp_path / "jobs" / job_id / "source" / "video.mp4"
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"video")
     db.create_video_job(
-        job_id=job_id, filename="video.mp4", source_path=video, voice_profile_id=job_id,
+        job_id=job_id, filename="video.mp4", source_path=video,
         source_language="auto", pause_after_transcription=False, pause_after_translation=True,
         background_volume=100, voice_volume=90,
     )
@@ -134,7 +126,7 @@ def test_delete_job_purges_unreferenced_audio_cache(monkeypatch, tmp_path: Path)
 
     # A cue in this job references kept-key.  After the job is deleted the cue
     # is gone too, so both cache entries become unreferenced and must be removed.
-    _make_job(db, config, tmp_path, "job", "kept-key")
+    _make_job(db, tmp_path, "job", "kept-key")
 
     assert db.delete_job("job") is True
     with db.connect() as conn:
@@ -156,8 +148,8 @@ def test_purge_cache_keeps_entries_referenced_by_other_jobs(monkeypatch, tmp_pat
     shared_wav.write_bytes(b"shared")
     db.cache_put("shared-key", str(shared_wav), 1000)
 
-    _make_job(db, config, tmp_path, "jobA", None)
-    _make_job(db, config, tmp_path, "jobB", "shared-key")
+    _make_job(db, tmp_path, "jobA", None)
+    _make_job(db, tmp_path, "jobB", "shared-key")
 
     # Deleting jobA must NOT remove the cache entry still referenced by jobB.
     assert db.delete_job("jobA") is True

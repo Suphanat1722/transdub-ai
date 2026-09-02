@@ -14,8 +14,5 @@ def get_local_settings() -> dict:
 @router.put("", response_model=LocalSettings)
 def put_local_settings(settings: LocalSettings) -> dict:
     return database.save_settings(
-        settings.nfe_step,
-        settings.inference_speed,
-        settings.max_start_delay_ms,
-        settings.allow_cpu,
+        settings.max_start_delay_ms, voice=settings.voice, tts_rate=settings.tts_rate
     )

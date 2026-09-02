@@ -19,9 +19,9 @@ from ..core.config import (
     CACHE_MAX_AGE_DAYS,
     CACHE_MAX_BYTES,
     DB_PATH,
+    EDGE_TTS_DEFAULT_VOICE,
     IMPORTS_DIR,
     JOBS_DIR,
-    MODEL_NAME,
     PIPELINE_REVISION,
     ROOT,
     data_relative,
@@ -162,7 +162,7 @@ def migrate_gemini_jobs() -> list[dict]:
         new_dir = JOBS_DIR / new_id
         new_dir.mkdir(parents=True, exist_ok=False)
         (new_dir / "source.srt").write_bytes(raw)
-        create_job(new_id, row["filename"], parsed.encoding, MODEL_NAME, parsed.warnings, parsed.cues)
+        create_job(new_id, row["filename"], parsed.encoding, "edge-tts", parsed.warnings, parsed.cues)
         with connect() as conn:
             conn.execute("DELETE FROM jobs WHERE id=?", (old_id,))
         old_dir = (JOBS_DIR / old_id).resolve()
@@ -378,7 +378,7 @@ def migrate_paths_to_relative() -> None:
         if conn.execute("SELECT 1 FROM migrations WHERE name=?", (migration_name,)).fetchone():
             return
         changed = 0
-        for table, key in (("cues", "id"), ("voice_profiles", "id"), ("audio_cache", "cache_key")):
+        for table, key in (("cues", "id"), ("audio_cache", "cache_key")):
             for row in conn.execute(
                 f"SELECT {key},audio_path FROM {table}"
                 if table != "audio_cache"
@@ -527,10 +527,7 @@ def _translation_progress(conn, job_id: str) -> dict | None:
 def get_job(job_id: str, include_cues: bool = True) -> dict | None:
     with connect() as conn:
         job = row_dict(
-            conn.execute(
-                "SELECT j.*,v.name voice_profile_name FROM jobs j LEFT JOIN voice_profiles v ON v.id=j.voice_profile_id WHERE j.id=?",
-                (job_id,),
-            ).fetchone()
+            conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         )
         if not job:
             return None
@@ -551,7 +548,6 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
             for row in rows:
                 cue = dict(row)
                 cue["warnings"] = json.loads(cue.pop("warnings_json"))
-                cue["tail_metrics"] = json.loads(cue.pop("tail_metrics_json", "{}"))
                 cue["source_cue_indexes"] = json.loads(
                     cue.pop("source_cue_indexes_json", "[]") or "[]"
                 )
@@ -588,10 +584,9 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
 def list_jobs() -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT j.*,v.name voice_profile_name,COUNT(c.id) total_cues,"
+            "SELECT j.*,COUNT(c.id) total_cues,"
             "SUM(CASE WHEN c.status='completed' THEN 1 ELSE 0 END) completed_cues "
-            "FROM jobs j LEFT JOIN voice_profiles v ON v.id=j.voice_profile_id "
-            "LEFT JOIN cues c ON c.job_id=j.id GROUP BY j.id ORDER BY j.created_at DESC"
+            "FROM jobs j LEFT JOIN cues c ON c.job_id=j.id GROUP BY j.id ORDER BY j.created_at DESC"
         ).fetchall()
         result = []
         for row in rows:
@@ -653,9 +648,8 @@ def _purge_unreferenced_cache() -> None:
 
 def update_job(job_id: str, **fields) -> None:
     allowed = {
-        "voice_profile_id",
-        "nfe_step",
-        "inference_speed",
+        "voice",
+        "tts_rate",
         "max_start_delay_ms",
         "status",
         "error",
@@ -723,15 +717,10 @@ def update_cue(cue_id: int, **fields) -> None:
         "speed_factor",
         "attempts",
         "error",
-        "effective_seed",
         "generation_revision",
         "inference_text",
-        "duration_multiplier",
-        "generation_passes",
-        "tail_metrics_json",
         "generation_duration_ms",
         "cache_key",
-        "requested_duration_multiplier",
         "pipeline_revision",
         "text",
         "start_ms",
@@ -764,78 +753,37 @@ def recover_processing_cues(job_id: str) -> int:
         ).rowcount
 
 
-def create_voice_profile(
-    profile_id: str, name: str, transcript: str, path: str, digest: str, duration_ms: int, warnings: list[str]
+def get_settings() -> dict:
+    with connect() as conn:
+        row = conn.execute("SELECT max_start_delay_ms FROM settings WHERE id=1").fetchone()
+        search = conn.execute("SELECT * FROM voice_settings WHERE id=1").fetchone()
+    item = dict(row)
+    if not search:
+        item.update({"voice": EDGE_TTS_DEFAULT_VOICE, "tts_rate": 0})
+    else:
+        item["voice"] = search["voice"]
+        item["tts_rate"] = int(search["tts_rate"] or 0)
+    return item
+
+
+def get_voices() -> list[dict]:
+    """Return the preset Edge voices configured for this install (single voice settings row may be expanded later)."""
+    settings = get_settings()
+    return [{"short_name": settings["voice"], "voice": settings["voice"]}]
+
+
+def save_settings(
+    max_start_delay_ms: int, voice: str = EDGE_TTS_DEFAULT_VOICE, tts_rate: int = 0
 ) -> dict:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO voice_profiles(id,name,transcript,audio_path,audio_hash,duration_ms,warnings_json,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (
-                profile_id,
-                name,
-                transcript,
-                path,
-                digest,
-                duration_ms,
-                json.dumps(warnings, ensure_ascii=False),
-                utc_now(),
-            ),
+            "UPDATE settings SET max_start_delay_ms=? WHERE id=1",
+            (max_start_delay_ms,),
         )
-    profile = get_voice_profile(profile_id)
-    if profile is None:
-        raise RuntimeError("สร้างโปรไฟล์เสียงแล้วแต่ไม่สามารถอ่านข้อมูลกลับได้")
-    return profile
-
-
-def get_voice_profile(profile_id: str) -> dict | None:
-    with connect() as conn:
-        item = row_dict(conn.execute("SELECT * FROM voice_profiles WHERE id=?", (profile_id,)).fetchone())
-    if item:
-        item["warnings"] = json.loads(item.pop("warnings_json"))
-    return item
-
-
-def list_voice_profiles() -> list[dict]:
-    with connect() as conn:
-        rows = conn.execute("SELECT * FROM voice_profiles ORDER BY name COLLATE NOCASE").fetchall()
-    result = []
-    for row in rows:
-        item = dict(row)
-        item["warnings"] = json.loads(item.pop("warnings_json"))
-        result.append(item)
-    return result
-
-
-def delete_voice_profile(profile_id: str) -> str | None:
-    with connect() as conn:
-        used = conn.execute(
-            "SELECT COUNT(*) count FROM jobs WHERE voice_profile_id=?", (profile_id,)
-        ).fetchone()["count"]
-        if used:
-            raise ValueError("โปรไฟล์นี้ถูกใช้อยู่ในงาน จึงยังลบไม่ได้")
-        row = conn.execute("SELECT audio_path FROM voice_profiles WHERE id=?", (profile_id,)).fetchone()
-        if not row:
-            return None
-        conn.execute("DELETE FROM voice_profiles WHERE id=?", (profile_id,))
-        return row["audio_path"]
-
-
-def get_settings() -> dict:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT nfe_step,inference_speed,max_start_delay_ms,allow_cpu FROM settings WHERE id=1"
-        ).fetchone()
-    item = dict(row)
-    item["allow_cpu"] = bool(item["allow_cpu"])
-    return item
-
-
-def save_settings(nfe_step: int, inference_speed: float, max_start_delay_ms: int, allow_cpu: bool) -> dict:
-    with connect() as conn:
         conn.execute(
-            "UPDATE settings SET nfe_step=?,inference_speed=?,max_start_delay_ms=?,allow_cpu=? WHERE id=1",
-            (nfe_step, inference_speed, max_start_delay_ms, int(allow_cpu)),
+            "INSERT INTO voice_settings(id,voice,tts_rate) VALUES(1,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET voice=excluded.voice,tts_rate=excluded.tts_rate",
+            (voice, int(tts_rate)),
         )
     return get_settings()
 
@@ -912,7 +860,6 @@ def list_cues(
     for row in rows:
         cue = dict(row)
         cue["warnings"] = json.loads(cue.pop("warnings_json"))
-        cue["tail_metrics"] = json.loads(cue.pop("tail_metrics_json", "{}"))
         cue["source_cue_indexes"] = json.loads(
             cue.pop("source_cue_indexes_json", "[]") or "[]"
         )
@@ -925,39 +872,40 @@ def create_video_job(
     job_id: str,
     filename: str,
     source_path: Path,
-    voice_profile_id: str,
     source_language: str,
     pause_after_transcription: bool,
     pause_after_translation: bool,
     background_volume: float,
     voice_volume: float,
-    nfe_step: int | None = None,
+    voice: str | None = None,
+    tts_rate: int = 0,
+    output_dir: str | None = None,
 ) -> dict:
     now = utc_now()
     seed = int.from_bytes(uuid.uuid4().bytes[:4], "big") & 0x7FFFFFFF
     settings = get_settings()
-    effective_nfe = nfe_step if nfe_step is not None else settings["nfe_step"]
+    effective_voice = voice or settings["voice"]
+    effective_rate = int(tts_rate if tts_rate is not None else settings.get("tts_rate") or 0)
     with connect() as conn:
         conn.execute(
             """INSERT INTO jobs(
                 id,filename,encoding,model,status,warnings_json,created_at,updated_at,
-                voice_profile_id,nfe_step,inference_speed,max_start_delay_ms,seed,engine,
+                voice,tts_rate,max_start_delay_ms,seed,engine,
                 pipeline_revision,source_path,source_language,target_language,
                 pause_after_transcription,pause_after_translation,background_volume,voice_volume,
-                stage,progress
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?)""",
+                stage,progress,output_dir
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id,
                 filename,
                 "utf-8",
-                MODEL_NAME,
+                "edge-tts",
                 "queued",
                 "[]",
                 now,
                 now,
-                voice_profile_id,
-                effective_nfe,
-                settings["inference_speed"],
+                effective_voice,
+                effective_rate,
                 settings["max_start_delay_ms"],
                 seed,
                 PIPELINE_REVISION,
@@ -970,6 +918,7 @@ def create_video_job(
                 voice_volume,
                 "uploaded",
                 0,
+                output_dir or None,
             ),
         )
     created = get_job(job_id, include_cues=False)

@@ -16,8 +16,6 @@ dist/
 # Runtime data and downloaded model weights
 .env
 data/*
-!data/voice-profiles/
-!data/voice-profiles/**
 models--*/
 models/
 vendor/**/.git.backup/

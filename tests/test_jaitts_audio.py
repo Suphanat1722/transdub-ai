@@ -1,22 +1,23 @@
 import math
+import shutil
 import struct
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import MAX_END_SPEED, SAMPLE_RATE
 from app.services.audio import (
     INLINE_FILTER_LIMIT,
     _filter_complex_args,
-    analyze_audio_tail,
     assemble,
-    choose_safer_candidate,
     fit_before_next_start,
-    has_active_audio_tail,
-    normalize_reference,
     plan_timeline,
     write_pcm_wav,
 )
+
+pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is required")
 
 
 def tone(duration_ms: int, frequency: int = 440) -> bytes:
@@ -160,44 +161,11 @@ def test_timeline_uses_gap_then_caps_delay_and_allows_remaining_overlap(tmp_path
     assert capped[1]["overlap_ms"] == 1000
 
 
-def test_normalize_reference_and_hash(tmp_path):
-    source, output = tmp_path / "source.wav", tmp_path / "reference.wav"
-    write_pcm_wav(source, tone(6000))
-    duration, digest, warnings = normalize_reference(source, output)
-    assert 5900 <= duration <= 6100
-    assert len(digest) == 64
-    assert warnings == []
-
-
 def test_large_filter_graph_uses_script_file(tmp_path):
     filter_file = tmp_path / "mix-filter.txt"
     graph = "a" * (INLINE_FILTER_LIMIT + 1)
     assert _filter_complex_args(graph, filter_file) == ["-filter_complex_script", str(filter_file)]
     assert filter_file.read_text(encoding="utf-8") == graph
-
-
-def test_detects_active_audio_at_generated_boundary(tmp_path):
-    active = tmp_path / "active.wav"
-    quiet = tmp_path / "quiet.wav"
-    write_pcm_wav(active, tone(500))
-    write_pcm_wav(quiet, tone(400) + bytes(int(SAMPLE_RATE * 0.2) * 2))
-    assert has_active_audio_tail(active)
-    assert not has_active_audio_tail(quiet)
-
-
-def test_adaptive_tail_metrics_distinguish_cutoff_and_silence(tmp_path):
-    cutoff = tmp_path / "cutoff.wav"
-    natural = tmp_path / "natural.wav"
-    write_pcm_wav(cutoff, tone(500))
-    write_pcm_wav(natural, tone(400) + bytes(int(SAMPLE_RATE * 0.1) * 2))
-    assert analyze_audio_tail(cutoff)["suspected_cutoff"] is True
-    assert analyze_audio_tail(natural)["suspected_cutoff"] is False
-
-
-def test_candidate_selection_prefers_cleaner_tail():
-    abrupt = {"metrics": {"suspected_cutoff": True, "trailing_silence_ms": 0, "tail_db": -10}}
-    clean = {"metrics": {"suspected_cutoff": False, "trailing_silence_ms": 50, "tail_db": -40}}
-    assert choose_safer_candidate(abrupt, clean) is clean
 
 
 def test_assemble_1305_cues_keeps_every_command_under_windows_limit(tmp_path, monkeypatch):

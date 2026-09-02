@@ -34,9 +34,10 @@ class JobStatusResponse(BaseModel):
 
 
 class JobActionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     action: str
     cue_id: int | None = None
-    nfe_step: int | None = None
 
     @field_validator("action")
     @classmethod
@@ -53,13 +54,6 @@ class JobActionRequest(BaseModel):
         }
         if value not in allowed:
             raise ValueError("action ไม่รองรับ")
-        return value
-
-    @field_validator("nfe_step")
-    @classmethod
-    def supported_nfe(cls, value: int | None) -> int | None:
-        if value is not None and value not in {16, 32}:
-            raise ValueError("nfe_step ต้องเป็น 16 หรือ 32")
         return value
 
 
@@ -83,30 +77,19 @@ class GlossaryResponse(BaseModel):
 
 
 class StartRequest(BaseModel):
-    voice_profile_id: str
-    nfe_step: int = 32
-    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    voice: str = "th-TH-NiwatNeural"
+    tts_rate: int = Field(default=0, ge=-50, le=50)
 
-    @field_validator("nfe_step")
-    @classmethod
-    def supported_nfe(cls, value: int) -> int:
-        if value not in {16, 32}:
-            raise ValueError("nfe_step ต้องเป็น 16 หรือ 32")
-        return value
+
+class VoiceSettings(BaseModel):
+    voice: str = "th-TH-NiwatNeural"
+    tts_rate: int = Field(default=0, ge=-50, le=50)
 
 
 class LocalSettings(BaseModel):
-    nfe_step: int = 32
-    inference_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     max_start_delay_ms: int = Field(default=2000, ge=0, le=5000)
-    allow_cpu: bool = True
-
-    @field_validator("nfe_step")
-    @classmethod
-    def supported_nfe(cls, value: int) -> int:
-        if value not in {16, 32}:
-            raise ValueError("nfe_step ต้องเป็น 16 หรือ 32")
-        return value
+    voice: str = "th-TH-NiwatNeural"
+    tts_rate: int = Field(default=0, ge=-50, le=50)
 
 
 class RetryCueRequest(BaseModel):

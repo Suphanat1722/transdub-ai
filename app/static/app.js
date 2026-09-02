@@ -46,25 +46,33 @@ function formatSize(bytes) {
 async function loadHealth() {
   try {
     const health = await api("/api/health");
-    const ready = health.ffmpeg_available && health.demucs_available && health.gemini_configured && health.model?.state !== "error";
+    const ready = health.ffmpeg_available && health.edge_tts_available && health.gemini_configured;
     $("#health").textContent = ready ? "● ระบบพร้อม" : "● ต้องตั้งค่าระบบ";
     $("#health").classList.toggle("ok", ready);
     const issues = [];
     if (!health.ffmpeg_available) issues.push("ไม่พบ FFmpeg");
-    if (!health.demucs_available) issues.push("ยังไม่ได้ติดตั้ง Demucs");
+    if (!health.edge_tts_available) issues.push("Edge TTS เชื่อมต่อไม่ได้");
     if (!health.gemini_configured) issues.push("ยังไม่มี GEMINI_API_KEY");
-    if (health.model?.state === "error") issues.push(`JaiTTS: ${health.model.error}`);
     $("#system-warning").hidden = !issues.length;
     $("#system-warning").textContent = issues.join(" · ");
   } catch (error) { $("#health").textContent = "● เชื่อมต่อ backend ไม่ได้"; }
 }
 
-async function loadProfiles() {
-  const profiles = await api("/api/voice-profiles");
-  const select = $("#voice-profile");
-  select.innerHTML = profiles.length
-    ? profiles.map((profile) => `<option value="${profile.id}">${escapeHtml(profile.name)} · ${(profile.duration_ms / 1000).toFixed(1)}s</option>`).join("")
-    : '<option value="">สร้างโปรไฟล์เสียงก่อน</option>';
+async function loadVoices() {
+  try {
+    const voices = await api("/api/voices");
+    const defaultSettings = await api("/api/voices/default");
+    const select = $("#voice-select");
+    if (!voices.length) {
+      select.innerHTML = '<option value="">ไม่พบเสียง (Edge TTS เข้าถึงไม่ได้)</option>';
+      return;
+    }
+    select.innerHTML = voices.map((voice) =>
+      `<option value="${escapeHtml(voice.short_name)}">${escapeHtml(voice.label)}</option>`
+    ).join("");
+    const preferred = defaultSettings.voice;
+    if (preferred) select.value = preferred;
+  } catch (error) { $("#voice-select").innerHTML = '<option value="">ไม่สามารถโหลดเสียงได้</option>'; }
 }
 
 async function loadJobs() {
@@ -256,12 +264,17 @@ $("#job-form").onsubmit = (event) => {
   request.onerror = () => toast("อัปโหลดไม่สำเร็จ", true); request.send(form);
 };
 
-$("#profile-form").onsubmit = async (event) => { event.preventDefault(); try { await api("/api/voice-profiles", { method: "POST", body: new FormData(event.currentTarget) }); event.currentTarget.reset(); await loadProfiles(); toast("สร้างโปรไฟล์เสียงแล้ว"); } catch (error) { toast(error.message, true); } };
 $("#video").onchange = (event) => { const file = event.target.files[0]; $("#video-name").textContent = file ? `${file.name} · ${formatSize(file.size)}` : "รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB"; };
-document.querySelectorAll('input[type="range"]').forEach((input) => input.oninput = () => $(`#${input.name === "voice_volume" ? "voice" : "background"}-value`).textContent = `${input.value}%`);
+function bindRanges() {
+  document.querySelectorAll('input[type="range"]').forEach((input) => input.oninput = () => {
+    const label = input.name === "voice_volume" ? "voice" : input.name === "tts_rate" ? "tts-rate" : "background";
+    $(`#${label}-value`).textContent = `${input.value}%`;
+  });
+}
+bindRanges();
 document.querySelectorAll(".tabs button").forEach((button) => button.onclick = async () => { document.querySelectorAll(".tabs button").forEach((item) => item.classList.remove("active")); button.classList.add("active"); state.layer = button.dataset.layer; state.offset = 0; await loadCues(); });
 $("#prev-page").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadCues(); };
 $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };
 $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
 
-await Promise.all([loadHealth(), loadProfiles(), loadJobs()]);
+await Promise.all([loadHealth(), loadVoices(), loadJobs()]);

@@ -1,18 +1,14 @@
 # Third-party notices
 
-The MIT license in this repository covers only the application code authored for JaiCue Studio. It does not relicense model weights or third-party packages.
+The MIT license in this repository covers only the application code authored for TransDub AI. It does not relicense third-party services, model weights, or packages.
 
-## JaiTTS-F5TTS
+## Microsoft Edge TTS
 
-- Project: `JTS-AI/JaiTTS-F5TTS`
-- License: Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
-- Intended use in this application: personal and research use; commercial use is not permitted by the model license.
-- Model weights are not included in this repository.
-
-## thonburian-tts
-
-The setup script downloads `biodatlab/thonburian-tts` at commit `032fe7e51674afe066a98e6d3cf47fc96d04b290`. Its own license files remain authoritative and are not replaced by this repository's MIT license.
+- Service: Microsoft Edge Text-to-Speech (`https://speech.platform.bing.com`), accessed via the Python package `edge-tts`
+- Nature: a cloud service offering preset neural voices. TransDub AI does not perform voice cloning with it.
+- Licensing: use of Microsoft's online TTS voices and their audio output is subject to Microsoft's own terms of service. Audio synthesized from Edge voices may carry usage restrictions; verify before distributing outputs commercially or publicly.
+- Network: synthesis requires internet access to Microsoft's endpoint.
 
 ## Other dependencies
 
-Python packages installed from `requirements.txt` and PyTorch packages installed by `setup.bat` retain their respective upstream licenses.
+Python packages installed from `pyproject.toml` retain their respective upstream licenses. The Demucs model, when downloaded and used for background separation, retains its upstream (MIT) license.

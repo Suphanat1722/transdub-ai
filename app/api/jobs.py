@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -13,7 +14,7 @@ from ..core.config import JOBS_DIR, MAX_VIDEO_BYTES, resolve_data_path
 from ..repositories import database as db
 from ..services.translation import serialize_srt
 from ..services.worker import worker
-from .dependencies import require_job, require_profile
+from .dependencies import require_job
 from .schemas import CueEditRequest, JobActionRequest
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -65,19 +66,22 @@ def jobs() -> list[dict]:
 @router.post("", status_code=202)
 async def create_job(
     video: UploadFile = File(...),
-    voice_profile_id: str = Form(...),
+    voice: str = Form(""),
     source_language: str = Form("auto"),
     pause_after_transcription: bool = Form(False),
     pause_after_translation: bool = Form(False),
     background_volume: float = Form(100),
     voice_volume: float = Form(100),
-    nfe_step: int = Form(32),
+    tts_rate: int = Form(0),
+    output_dir: str = Form(""),
 ) -> dict:
-    require_profile(voice_profile_id)
     if not 0 <= background_volume <= 150 or not 0 <= voice_volume <= 150:
         raise HTTPException(422, "ระดับเสียงต้องอยู่ระหว่าง 0–150 เปอร์เซ็นต์")
-    if nfe_step not in {16, 32}:
-        raise HTTPException(422, "nfe_step ต้องเป็น 16 หรือ 32")
+    if not -50 <= tts_rate <= 50:
+        raise HTTPException(422, "ความเร็วเสียงพูดต้องอยู่ระหว่าง -50 ถึง +50 เปอร์เซ็นต์")
+    export_dir = output_dir.strip() or None
+    if export_dir and not os.path.isdir(export_dir):
+        raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {export_dir}")
     safe_name = Path(video.filename or "video.mp4").name
     suffix = Path(safe_name).suffix.lower()[:12] or ".video"
     job_id = str(uuid.uuid4())
@@ -91,13 +95,14 @@ async def create_job(
             job_id=job_id,
             filename=safe_name,
             source_path=target,
-            voice_profile_id=voice_profile_id,
             source_language=source_language.strip()[:80] or "auto",
             pause_after_transcription=pause_after_transcription,
             pause_after_translation=pause_after_translation,
             background_volume=background_volume,
             voice_volume=voice_volume,
-            nfe_step=nfe_step,
+            voice=voice.strip() or None,
+            tts_rate=tts_rate,
+            output_dir=export_dir,
         )
     except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -189,10 +194,8 @@ def action(job_id: str, request: JobActionRequest) -> dict:
             raise HTTPException(404, "ไม่พบ cue")
         if job["stage"] not in {"synthesizing", "synthesized"}:
             raise HTTPException(409, "งานยังไม่ได้อยู่ในขั้นสร้างเสียง")
-        if request.nfe_step is not None:
-            db.update_job(job_id, nfe_step=request.nfe_step)
-        # Reset this cue so the worker regenerates it, using the (possibly new)
-        # job-level nfe_step, which also produces a fresh audio-cache key.
+        # Reset this cue so the worker regenerates it, which also produces a
+        # fresh audio-cache key (the generation_revision participates in it).
         db.update_cue(
             cue_id,
             status="pending",

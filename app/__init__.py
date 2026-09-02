@@ -1,1 +1,1 @@
-"""Local JaiTTS SRT-to-speech application."""
+"""Edge TTS SRT-to-speech video dubbing application."""

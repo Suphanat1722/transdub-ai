@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from app.services.media import MediaError, mix_output, probe_media
+
+pytestmark = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is required")
 
 
 def run_ffmpeg(*args: str) -> None:

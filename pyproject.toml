@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "transdub-ai"
 version = "1.0.2"
-description = "End-to-end local Thai video dubbing with Gemini, JaiTTS, Demucs and FFmpeg"
+description = "End-to-end local Thai video dubbing with Gemini, Edge TTS, Demucs and FFmpeg"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
@@ -13,6 +13,7 @@ authors = [{ name = "Suphanat Rueanthai" }]
 dependencies = [
   "alembic==1.16.5",
   "charset-normalizer==3.4.3",
+  "edge-tts==7.2.8",
   "fastapi==0.116.1",
   "google-genai==2.20.0",
   "pydub==0.25.1",
@@ -26,8 +27,6 @@ dependencies = [
 inference = [
   "cached-path==1.8.0",
   "demucs==4.0.1",
-  "f5-tts==1.1.22",
-  "pythainlp==5.3.7",
 ]
 test = [
   "httpx==0.28.1",

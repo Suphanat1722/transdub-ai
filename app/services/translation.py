@@ -84,10 +84,10 @@ TIME_RE = re.compile(
     r"^(?:\d{1,3}\s+)?(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
     r"(\d{1,3}):(\d{2}):(\d{2})[,.](\d{3})(?:\s+(.*))?$"
 )
-# JaiTTS can speak Latin characters embedded in a Thai sentence only when the
-# user has deliberately supplied a glossary.  A bare English token, however,
-# is almost always read incorrectly.  This mirrors the validator used by the
-# original translator project and avoids rejecting otherwise valid Thai cues
+# Thai TTS (Edge TTS) may read Latin characters embedded in a Thai sentence only
+# when the user has deliberately supplied a glossary.  A bare English token,
+# however, is almost always read incorrectly.  This mirrors the validator used
+# by the original translator project and avoids rejecting otherwise valid Thai cues
 # that contain a product or proper name in context.
 STANDALONE_LATIN_RE = re.compile(
     r'''^[\s"'([{]*[A-Za-z][A-Za-z0-9#_.+\-]{0,20}[.!?]?[\s"')\]}]*$'''
@@ -340,9 +340,9 @@ def _has_unsafe_latin(text: str) -> bool:
         return True
     if LATIN_TOKEN_RE.search(stripped) and not re.search(r"[\u0E00-\u0E7F]", stripped):
         return True
-    # Proper names such as “Whisper Flow” are useful in a Thai sentence and
+# Proper names such as “Whisper Flow” are useful in a Thai sentence and
     # are handled by the voice glossary.  Short all-capital technical tokens
-    # (AI/API/MP4/…) are not reliably pronounced by JaiTTS without a glossary.
+    # (AI/API/MP4/...) are not reliably pronounced by TTS without a glossary.
     return any(
         token.lower().rstrip("'") in UNSAFE_LATIN_TOKENS
         for token in LATIN_TOKEN_RE.findall(text)
