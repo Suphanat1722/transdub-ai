@@ -243,15 +243,25 @@ class JobWorker:
         )
 
     def _import_pending_to_translate(self, job: dict) -> None:
-        """Move import-pending jobs (source from SRT) to the Gemini translate step."""
+        """Move import-pending jobs (source from SRT) to the Gemini translate step.
+
+        The translation-layer prompts are set at creation, and untranslated SRTs
+        must pause for the user to review the source and write the Gemini
+        system prompt before translating -- exactly like the normal ASR flow.
+        """
         job_id = job["id"]
-        # Source cues come from the imported SRT; skip ASR, go to translation.
+        source_srt = JOBS_DIR / job_id / "artifacts" / "source.srt"
+        source_srt.parent.mkdir(parents=True, exist_ok=True)
+        source_srt.write_text(serialize_srt(db.source_cues(job_id), bom=True), encoding="utf-8")
+        db.put_artifact(job_id, "source_srt", source_srt, "application/x-subrip")
+        pause = bool(job.get("pause_after_transcription"))
         db.update_job(
             job_id,
-            status="queued",
+            status="reviewing_transcript" if pause else "queued",
             stage="transcribed",
             progress=45,
-            transcript_approved=1,
+            source_srt_path=data_relative(source_srt),
+            transcript_approved=0 if pause else 1,
             wait_reason=None,
             error=None,
         )
