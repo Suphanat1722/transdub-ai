@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -18,6 +19,7 @@ from .dependencies import require_job
 from .schemas import CueEditRequest, JobActionRequest
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
 UPLOAD_CHUNK = 1024 * 1024
 ACTIVE = {
     "running",
@@ -374,15 +376,21 @@ def delete_job(job_id: str) -> Response:
     job_dir = (JOBS_DIR / job_id).resolve()
     if not job_dir.is_relative_to(JOBS_DIR.resolve()):
         raise HTTPException(400, "เส้นทางงานไม่ถูกต้อง")
-    staged = JOBS_DIR / f".deleting-{job_id}-{uuid.uuid4().hex}"
-    if job_dir.exists():
-        job_dir.rename(staged)
+
+    # Delete the database row first so the job disappears immediately even if
+    # the on-disk folder is temporarily locked (e.g. a viewer has a file open).
+    if not db.delete_job(job_id):
+        raise HTTPException(404, "ไม่พบงานในฐานข้อมูล")
+
+    # Remove the leftover folder if it exists; do not fail the request when a
+    # file is still locked by another process (the delete already succeeded).
     try:
-        if not db.delete_job(job_id):
-            raise RuntimeError("ไม่พบงานในฐานข้อมูล")
-    except Exception:
-        if staged.exists():
-            staged.rename(job_dir)
-        raise
-    shutil.rmtree(staged, ignore_errors=True)
+        if job_dir.exists():
+            shutil.rmtree(job_dir, ignore_errors=False)
+        else:
+            for leftover in JOBS_DIR.glob(f".deleting-{job_id}-*"):
+                shutil.rmtree(leftover, ignore_errors=False)
+    except OSError as exc:
+        # Folder locked; record it but do not turn a successful delete into 500.
+        logger.warning("ลบไฟล์งาน %s ไม่สําเร็จ (อาจถูกล็อก): %s", job_id, exc)
     return Response(status_code=204)
