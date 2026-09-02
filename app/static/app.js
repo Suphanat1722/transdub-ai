@@ -106,6 +106,8 @@ function showCreate() {
 async function openJob(id) {
   state.current = await api(`/api/jobs/${id}`);
   $("#create-panel").hidden = true; $("#job-panel").hidden = false;
+  delete $("#translation-prompt").dataset["touched"];
+  $("#translation-srt").value = "";
   renderJob(); renderJobList();
   bindDeleteButton();
   state.offset = 0; await loadCues();
@@ -139,7 +141,39 @@ function renderJob() {
   const current = Math.max(0, order.indexOf(job.stage));
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
   $("#job-warnings").innerHTML = (job.warnings || []).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
-  renderActions(job); renderArtifacts(job.artifacts || []);
+  renderActions(job); renderArtifacts(job.artifacts || []); renderTranslationTools(job);
+}
+
+function renderTranslationTools(job) {
+  const tools = $("#translation-tools");
+  tools.hidden = !(job.status === "reviewing_translation");
+  if (!tools.hidden) {
+    const box = $("#translation-prompt");
+    // Only populate from the job when the user has not started editing.
+    if (!box.dataset.touched) box.value = job.translation_prompt || "";
+  }
+}
+
+async function savePrompt() {
+  const value = $("#translation-prompt").value;
+  try {
+    state.current = await api(`/api/jobs/${state.current.id}/translation-prompt`, {
+      method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ prompt: value }),
+    });
+    toast("บันทึก prompt แล้ว");
+  } catch (error) { toast(error.message, true); }
+}
+
+async function importSrt() {
+  const input = $("#translation-srt");
+  const file = input.files && input.files[0];
+  if (!file) { toast("เลือกไฟล์ SRT ก่อน", true); return; }
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    state.current = await api(`/api/jobs/${state.current.id}/translation-srt`, { method: "POST", body: form });
+    toast("นำเข้า SRT แล้ว รอตรวจคำแปล"); await openJob(state.current.id);
+  } catch (error) { toast(error.message, true); }
 }
 
 function renderTranslationProgress(job) {
@@ -166,7 +200,7 @@ function renderActions(job) {
   if (["paused", "waiting_quota"].includes(job.status)) actions.push(["resume", "ทําต่อ"]);
   if (["failed", "needs_review"].includes(job.status)) actions.push(["retry", "ลองต่อ"]);
   if (job.status === "reviewing_transcript") actions.push(["approve_transcript", "ยืนยัน transcript และแปลต่อ"]);
-  if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"]);
+  if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"], ["retranslate", "แปลใหม่"]);
   if (job.status === "completed" && job.artifacts?.some((item) => item.kind === "dub_wav")) actions.push(["remux", "มิกซ์ MP4 ใหม่"]);
   $("#actions").innerHTML = actions.map(([action, label], index) => {
     const cls = index === 0 ? "primary" : "secondary";
@@ -192,7 +226,7 @@ async function runAction(action) {
   try {
     state.current = await api(`/api/jobs/${state.current.id}/actions`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action }) });
     renderJob(); await loadJobs();
-    if (["resume", "retry", "approve_transcript", "approve_translation", "remux"].includes(action)) openJob(state.current.id);
+    if (["resume", "retry", "approve_transcript", "approve_translation", "remux", "retranslate"].includes(action)) openJob(state.current.id);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -276,5 +310,8 @@ document.querySelectorAll(".tabs button").forEach((button) => button.onclick = a
 $("#prev-page").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadCues(); };
 $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };
 $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
+$("#translation-prompt").addEventListener("input", () => { $("#translation-prompt").dataset.touched = "1"; });
+$("#save-prompt").onclick = savePrompt;
+$("#import-srt-btn").onclick = importSrt;
 
 await Promise.all([loadHealth(), loadVoices(), loadJobs()]);

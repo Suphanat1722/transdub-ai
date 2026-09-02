@@ -254,7 +254,8 @@ class JobWorker:
             raise RuntimeError("ไม่มี source cue สําหรับแปล")
         try:
             translated = translate(
-                job_id, source, job_dir / "work", job.get("source_language") or "auto"
+                job_id, source, job_dir / "work", job.get("source_language") or "auto",
+                prompt=job.get("translation_prompt"),
             )
         except QuotaWait:
             raise

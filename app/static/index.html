@@ -89,6 +89,20 @@
           <div id="job-warnings" class="warning-list"></div>
           <div id="actions" class="actions"></div>
 
+          <section class="card" id="translation-tools" hidden>
+            <div class="card-head"><h3>เครื่องมือคำแปล</h3></div>
+            <div class="prompt-box">
+              <label>Prompt สำหรับให้ Gemini แปล (ประจำงานนี้)</label>
+              <textarea id="translation-prompt" rows="6" placeholder="ว่าง = ใช้ค่าเริ่มต้นระบบ"></textarea>
+              <button class="secondary" id="save-prompt">บันทึก prompt</button>
+            </div>
+            <div class="srt-import">
+              <label>นำเข้าไฟล์ SRT ที่แปลเอง (แทนที่คำแปลไทย แล้วรอตรวจ)</label>
+              <input id="translation-srt" type="file" accept=".srt" name="file">
+              <button class="secondary" id="import-srt-btn">นำเข้า SRT</button>
+            </div>
+          </section>
+
           <section class="card">
             <div class="card-head"><h3>ไฟล์ผลลัพธ์</h3></div>
             <div id="artifacts" class="artifacts"></div>

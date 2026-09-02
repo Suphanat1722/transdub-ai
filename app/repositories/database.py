@@ -142,7 +142,7 @@ def migrate_gemini_jobs() -> list[dict]:
     with connect() as conn:
         if conn.execute("SELECT 1 FROM migrations WHERE name='gemini_to_jaitts_v1'").fetchone():
             return []
-        legacy = conn.execute("SELECT * FROM jobs WHERE model LIKE 'gemini%' OR engine!='jaitts'").fetchall()
+        legacy = conn.execute("SELECT * FROM jobs WHERE model LIKE 'gemini%' AND engine='jaitts'").fetchall()
     migrated: list[dict] = []
     for row in legacy:
         old_id = row["id"]
@@ -663,6 +663,7 @@ def update_job(job_id: str, **fields) -> None:
         "pipeline_revision",
         "glossary_json",
         "glossary_revision",
+        "translation_prompt",
         "source_path",
         "original_audio_path",
         "background_path",

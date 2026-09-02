@@ -283,13 +283,15 @@ def _render(cues: list[dict], start: int, end: int) -> str:
     )
 
 
-def _request(cues: list[dict], chunk: Chunk, source_language: str, errors: list[str]) -> tuple[str, str, int]:
+def _request(
+    cues: list[dict], chunk: Chunk, source_language: str, errors: list[str], prompt: str | None = None
+) -> tuple[str, str, int]:
     target_chars = sum(len(cue["text"]) for cue in cues[chunk.target_start : chunk.target_end + 1])
     correction = ""
     if errors:
         correction = "\n\nผลก่อนหน้ามีข้อผิดพลาด โปรดสร้างใหม่ทั้งหมด:\n- " + "\n- ".join(errors[:12])
     contents = _render(cues, chunk.target_start, chunk.target_end) + correction
-    system = DEFAULT_TRANSLATION_PROMPT
+    system = (prompt or "").strip() or DEFAULT_TRANSLATION_PROMPT
     return system, contents, min(32_768, max(4_096, int(target_chars * 1.2)))
 
 
@@ -537,6 +539,7 @@ def _translate_chunk(
     source_language: str,
     client: Any,
     models: list[str],
+    prompt: str | None = None,
 ) -> tuple[list[dict], list[str], str]:
     """Generate and validate one chunk, trying every configured model."""
     last_error = "แปลไม่สําเร็จ"
@@ -547,7 +550,7 @@ def _translate_chunk(
         db.update_job(job_id, translation_model=model)
         for attempt in range(2):
             system, contents, max_tokens = _request(
-                source, chunk, source_language, correction_errors
+                source, chunk, source_language, correction_errors, prompt
             )
             try:
                 level = types.ThinkingLevel.MINIMAL if "lite" in model else types.ThinkingLevel.LOW
@@ -639,7 +642,9 @@ def _translate_chunk(
     raise TranslationError(error)
 
 
-def translate(job_id: str, source: list[dict], work_dir: Path, source_language: str) -> list[dict]:
+def translate(
+    job_id: str, source: list[dict], work_dir: Path, source_language: str, prompt: str | None = None
+) -> list[dict]:
     key = gemini_api_key()
     if not key:
         raise TranslationError("ไม่พบ GEMINI_API_KEY ในไฟล์ .env")
@@ -685,6 +690,7 @@ def translate(job_id: str, source: list[dict], work_dir: Path, source_language: 
                     source_language=source_language,
                     client=client,
                     models=models,
+                    prompt=prompt,
                 )
             except ChunkValidationError as error:
                 children = split_chunk(chunk, source)

@@ -11,12 +11,13 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from ..core.config import JOBS_DIR, MAX_VIDEO_BYTES, resolve_data_path
+from ..core.config import JOBS_DIR, MAX_VIDEO_BYTES, data_relative, resolve_data_path
 from ..repositories import database as db
+from ..services.srt import SrtValidationError, parse_srt
 from ..services.translation import serialize_srt
 from ..services.worker import worker
 from .dependencies import require_job
-from .schemas import CueEditRequest, JobActionRequest
+from .schemas import CueEditRequest, JobActionRequest, TranslationPromptRequest
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
@@ -178,8 +179,32 @@ def action(job_id: str, request: JobActionRequest) -> dict:
         worker.wake()
     elif selected == "approve_translation":
         if job["stage"] != "translated":
-            raise HTTPException(409, "งานยังไม่อยู่ที่ขั้นตรวจคำแปล")
+            raise HTTPException(409, "งานยังไม่อยู่ที่ขั้นตรวจคําแปล")
         db.update_job(job_id, translation_approved=1, status="queued", wait_reason=None)
+        worker.wake()
+    elif selected == "retranslate":
+        if job["stage"] != "translated":
+            raise HTTPException(409, "งานยังไม่อยู่ที่ขั้นตรวจคําแปล")
+        job_dir = JOBS_DIR / job_id
+        shutil.rmtree(job_dir / "cues", ignore_errors=True)
+        with db.connect() as conn:
+            conn.execute("DELETE FROM cues WHERE job_id=?", (job_id,))
+            conn.execute("DELETE FROM translation_chunks WHERE job_id=?", (job_id,))
+        db.delete_artifacts(
+            job_id, {"translated_srt", "dub_wav", "dub_mp3", "report_json", "report_csv", "final_video"}
+        )
+        db.update_job(
+            job_id,
+            stage="translated",
+            status="queued",
+            translation_approved=0,
+            translated_srt_path=None,
+            dub_audio_path=None,
+            output_video_path=None,
+            wait_reason=None,
+            error=None,
+            progress=47,
+        )
         worker.wake()
     elif selected == "remux":
         if not job.get("dub_audio_path"):
@@ -335,6 +360,79 @@ def edit_cue(job_id: str, cue_id: int, request: CueEditRequest) -> dict:
     if updated_job["status"] == "queued":
         worker.wake()
     return public_job(updated_job)
+
+
+@router.post("/{job_id}/translation-srt", status_code=200)
+async def import_translation_srt(job_id: str, file: UploadFile = File(...)) -> dict:
+    """Import a user-provided Thai SRT as the translation layer (draft).
+
+    Replaces the translated cues with the content/timecodes from the file and
+    parks the job at ``reviewing_translation`` so the user can confirm before
+    speech is generated.
+    """
+    job = require_job(job_id)
+    if job["status"] in ACTIVE:
+        raise HTTPException(409, "หยุดงานก่อนนําเข้า SRT")
+    if not job.get("source_cues"):
+        raise HTTPException(422, "งานยังไม่มี transcript ต้นฉบับ กรุณาถอดเสียงก่อน")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(422, "ไฟล์ SRT ว่างเปล่า")
+    try:
+        parsed = parse_srt(raw)
+    except SrtValidationError as exc:
+        raise HTTPException(422, f"ไฟล์ SRT ไม่ถูกต้อง: {exc}") from exc
+    required = {cue.source_index for cue in parsed.cues}
+    source_indexes = {str(cue["source_index"]) for cue in job["source_cues"]}
+    # Keep cues aligned to source where possible; import timing from the file.
+    translation_cues = []
+    for index, cue in enumerate(parsed.cues, 1):
+        translation_cues.append(
+            {
+                "source_index": cue.source_index,
+                "start_ms": cue.start_ms,
+                "end_ms": cue.end_ms,
+                "text": cue.text,
+                "warnings": list(cue.warnings),
+                "source_cue_indexes": [int(source) for source in (required & source_indexes)] or [index],
+            }
+        )
+
+    # Drop previous speech/artifacts downstream of translation.
+    job_dir = JOBS_DIR / job_id
+    shutil.rmtree(job_dir / "cues", ignore_errors=True)
+    with db.connect() as conn:
+        conn.execute("UPDATE translation_chunks SET status='pending',model=NULL,error=NULL WHERE job_id=?", (job_id,))
+    db.delete_artifacts(
+        job_id, {"dub_wav", "dub_mp3", "report_json", "report_csv", "final_video"}
+    )
+    db.replace_translation_cues(job_id, translation_cues)
+
+    translated_srt = job_dir / "artifacts" / "translated.th.srt"
+    translated_srt.parent.mkdir(parents=True, exist_ok=True)
+    translated_srt.write_text(serialize_srt(translation_cues, bom=True), encoding="utf-8")
+    db.put_artifact(job_id, "translated_srt", translated_srt, "application/x-subrip")
+    db.update_job(
+        job_id,
+        stage="translated",
+        status="reviewing_translation",
+        translation_approved=0,
+        dub_audio_path=None,
+        output_video_path=None,
+        translated_srt_path=data_relative(translated_srt),
+        progress=55,
+        wait_reason=None,
+        error=None,
+    )
+    return public_job(require_job(job_id))
+
+
+@router.put("/{job_id}/translation-prompt", status_code=200)
+def update_translation_prompt(job_id: str, request: TranslationPromptRequest) -> dict:
+    """Store the per-job custom translation prompt sent to Gemini."""
+    require_job(job_id, include_cues=False)
+    db.update_job(job_id, translation_prompt=request.prompt.strip())
+    return public_job(require_job(job_id, include_cues=False))
 
 
 @router.get("/{job_id}/artifacts/{kind}")
