@@ -46,6 +46,33 @@ def public_job(job: dict) -> dict:
     return result
 
 
+@router.post("/pick-folder", status_code=200)
+def pick_export_folder() -> dict:
+    """Open a native folder-picker on the server and return the chosen path.
+
+    The app runs on the same machine as the browser, so a server-side dialog
+    can return the real folder path (which the browser never exposes).  Used to
+    pick where the finished video should be saved.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory(initialdir=os.path.expanduser("~"))
+        root.destroy()
+    except Exception as exc:
+        logger.warning("เปิด dialog เลือกโฟลเดอร์ไม่สำเร็จ: %s", exc)
+        raise HTTPException(500, f"เปิด dialog เลือกโฟลเดอร์ไม่สำเร็จ: {exc}") from exc
+    if not folder:
+        raise HTTPException(400, "ไม่ได้เลือกโฟลเดอร์")
+    if not os.path.isdir(folder):
+        raise HTTPException(400, f"โฟลเดอร์นี้ไม่มีอยู่จริง: {folder}")
+    return {"path": folder}
+
+
 async def _save_upload(upload: UploadFile, target: Path) -> None:
     written = 0
     try:

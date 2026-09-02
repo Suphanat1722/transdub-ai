@@ -306,4 +306,11 @@ $("#use-srt").addEventListener("change", () => {
   document.querySelectorAll('input[name="pause_after_transcription"], input[name="pause_after_translation"]').forEach((cb) => { cb.checked = !on; cb.disabled = on; });
 });
 
+$("#pick-folder-btn").onclick = async () => {
+  try {
+    const res = await api("/api/jobs/pick-folder", { method: "POST" });
+    if (res && res.path) $("#output-dir").value = res.path;
+  } catch (error) { toast(error.message, true); }
+};
+
 await Promise.all([loadHealth(), loadVoices(), loadJobs()]);
