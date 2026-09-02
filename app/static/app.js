@@ -107,7 +107,6 @@ async function openJob(id) {
   state.current = await api(`/api/jobs/${id}`);
   $("#create-panel").hidden = true; $("#job-panel").hidden = false;
   delete $("#translation-prompt").dataset["touched"];
-  $("#translation-srt").value = "";
   renderJob(); renderJobList();
   bindDeleteButton();
   state.offset = 0; await loadCues();
