@@ -157,7 +157,10 @@ async def create_job(
             source_path=target,
             source_language=source_language.strip()[:80] or "auto",
             pause_after_transcription=False if mode == "import" else pause_after_transcription,
-            pause_after_translation=False if mode == "import" else pause_after_translation,
+            # import_pending must always pause for the user to review the
+            # Gemini translation before synthesis, regardless of what the UI
+            # sent (older cached JS used to uncheck the review boxes).
+            pause_after_translation=False if mode == "import" else (True if mode == "import_pending" else pause_after_translation),
             background_volume=background_volume,
             voice_volume=voice_volume,
             voice=voice.strip() or None,

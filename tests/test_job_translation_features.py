@@ -61,6 +61,10 @@ def test_create_job_with_pending_srt_sets_import_pending(monkeypatch, tmp_path: 
         data = resp.json()
         assert data["mode"] == "import_pending"
         assert data["status"] == "queued"
+        # Untranslated-SRT mode must always stop for Gemini-translation review,
+        # even when the UI sends no pause flag (e.g. cached older JS). This
+        # guarantees the job does not jump straight to synthesis.
+        assert data["pause_after_translation"] is True
         job_id = data["id"]
         job = db.get_job(job_id)
         assert job is not None

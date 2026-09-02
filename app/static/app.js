@@ -306,6 +306,13 @@ $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
 $("#translation-prompt").addEventListener("input", () => { $("#translation-prompt").dataset.touched = "1"; });
 $("#save-prompt").onclick = savePrompt;
 $("#use-srt").addEventListener("change", updateSrtMode);
+// The `.drop` box is a <div>, so it does not open the file picker on its own
+// like the video <label> does. Forward clicks to the (hidden) file input,
+// unless the click landed on the translated/pending radio options.
+$("#srt-upload-box").addEventListener("click", (event) => {
+  if (event.target.closest(".srt-mode")) return;
+  $("#srt-file").click();
+});
 $("#srt-file").addEventListener("change", () => {
   const file = $("#srt-file").files[0];
   $("#srt-file-name").textContent = file ? file.name : "ยังไม่ได้เลือกไฟล์";
