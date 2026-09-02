@@ -35,13 +35,13 @@ def upgrade() -> None:
     # that is part of a foreign key after the table exists, so the profile id is
     # left behind as an unused reference instead of being removed.
 
-    _add("jobs", sa.Column("voice", sa.Text(), nullable=False, server_default="th-TH-PremwadeeNeural"))
+    _add("jobs", sa.Column("voice", sa.Text(), nullable=False, server_default="th-TH-NiwatNeural"))
     _add("jobs", sa.Column("tts_rate", sa.Integer(), nullable=False, server_default="0"))
 
     op.execute(
         """CREATE TABLE IF NOT EXISTS voice_settings (
             id INTEGER PRIMARY KEY CHECK (id=1),
-            voice TEXT NOT NULL DEFAULT 'th-TH-PremwadeeNeural',
+            voice TEXT NOT NULL DEFAULT 'th-TH-NiwatNeural',
             tts_rate INTEGER NOT NULL DEFAULT 0
         )"""
     )
