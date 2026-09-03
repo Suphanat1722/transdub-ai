@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..core.config import youtube_proxy_settings
+
 # Languages chosen directly as the final dub text (no Gemini translation).
 THAI_LANGUAGE = "th"
 # Preferred subtitle language order; the first available one wins.
@@ -46,14 +48,32 @@ def _sanitize_filename(value: str) -> str:
     return (cleaned or "video")[:120]
 
 
-def download_video(url: str, target_dir: Path) -> Path:
-    """Download the video as MP4 into ``target_dir`` and return its path."""
-    target_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        from yt_dlp import YoutubeDL
-    except ImportError as exc:
-        raise YouTubeError("ยังไม่ได้ติดตั้ง yt-dlp") from exc
+def _build_transcript_api():
+    """Build a YouTubeTranscriptApi, routing through a residential proxy when configured.
 
+    Mirrors the reference extractor's approach: Webshare residential credentials
+    take priority over a generic proxy URL; with neither set it connects directly.
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+
+    webshare_user, webshare_pass, generic_url = youtube_proxy_settings()
+    if webshare_user and webshare_pass:
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=webshare_user, proxy_password=webshare_pass
+            )
+        )
+    if generic_url:
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(http_url=generic_url, https_url=generic_url)
+        )
+    return YouTubeTranscriptApi()
+
+
+def _download_options(target_dir: Path) -> dict:
+    """yt-dlp options, adding a proxy URL when configured."""
+    _, _, generic_url = youtube_proxy_settings()
     options = {
         "format": "bv*+ba/b",
         "outtmpl": str(target_dir / "youtube.%(ext)s"),
@@ -62,8 +82,21 @@ def download_video(url: str, target_dir: Path) -> Path:
         "quiet": True,
         "no_warnings": True,
     }
+    if generic_url:
+        options["proxy"] = generic_url
+    return options
+
+
+def download_video(url: str, target_dir: Path) -> Path:
+    """Download the video as MP4 into ``target_dir`` and return its path."""
+    target_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with YoutubeDL(options) as downloader:
+        from yt_dlp import YoutubeDL
+    except ImportError as exc:
+        raise YouTubeError("ยังไม่ได้ติดตั้ง yt-dlp") from exc
+
+    try:
+        with YoutubeDL(_download_options(target_dir)) as downloader:
             info = downloader.extract_info(url, download=True)
         ext = "mp4" if info.get("ext") == "mp4" else (info.get("ext") or "mp4")
     except Exception as exc:
@@ -90,13 +123,13 @@ def fetch_subtitle(url: str) -> tuple[str, str]:
     if not video_id:
         raise YouTubeError("ลิงก์ YouTube ไม่ถูกต้อง")
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
         from youtube_transcript_api.formatters import SRTFormatter
     except ImportError as exc:
         raise YouTubeError("ยังไม่ได้ติดตั้ง youtube-transcript-api") from exc
 
+    transcript_api = _build_transcript_api()
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = transcript_api.list(video_id)
     except Exception as exc:
         raise YouTubeError(f"อ่านรายการคำบรรยายจาก YouTube ไม่สำเร็จ: {exc}") from exc
 

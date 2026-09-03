@@ -54,6 +54,20 @@ def gemini_api_key() -> str:
     return os.getenv("GEMINI_API_KEY", "").strip()
 
 
+def youtube_proxy_settings() -> tuple[str, str, str]:
+    """Return (webshare_user, webshare_pass, generic_proxy_url) from the env.
+
+    Lets the YouTube transcript client route through a residential proxy when
+    YouTube blocks the local/cloud IP (same approach as the reference
+    extractor).  Empty strings mean "no proxy configured".
+    """
+    return (
+        os.getenv("YOUTUBE_PROXY_WEBSHARE_USER", "").strip(),
+        os.getenv("YOUTUBE_PROXY_WEBSHARE_PASS", "").strip(),
+        os.getenv("YOUTUBE_PROXY_URL", "").strip(),
+    )
+
+
 def ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 

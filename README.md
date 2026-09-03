@@ -13,6 +13,8 @@ TransDub AI เป็นเว็บแอปบน Windows สําหรั�
 > **เสียงและสถาปัตยกรรม**: ระบบเป็นแบบ YouTube-only — รับลิงก์วิดีโอ YouTube แล้วดึง subtitle ที่มีอยู่บนYouTube (ภาษาไทย/อังกฤษ/อื่น ๆ) มาใช้เป็นต้นฉบับ ไฟล์วิดีโอที่ไม่มีซับบน YouTube จะใช้ไม่ได้
 > ซับภาษาไทยไม่ต้องผ่าน Gemini เลย (ใช้เป็นเสียงพากย์ตรง ๆ) ซับภาษาอื่นส่ง Gemini แปลเป็นไทยก่อน
 > เสียงพากย์ใช้ **Microsoft Edge TTS** (preset voices, ไม่มี voice cloning) ต้องเชื่อมต่ออินเทอร์เน็ตเพื่อเข้าถึงบริการและสำหรับ YouTube
+>
+> **ถ้า YouTube บล็อก IP (เจอ "ถูกบล็อก/TooManyRequests")**: ตั้ง proxy ใน `.env` ได้ (`YOUTUBE_PROXY_WEBSHARE_USER`/`PASS` หรือ `YOUTUBE_PROXY_URL`) — ถ้าใช้ Webshare ต้องซื้อแพ็กเกจ **Residential** เท่านั้น ดูรายละเอียดใน `.env.example`
 
 ## เริ่มใช้งาน
 
