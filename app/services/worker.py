@@ -226,6 +226,7 @@ class JobWorker:
             db.replace_translation_cues(job_id, cues)
             db.update_job(
                 job_id,
+                status="queued",
                 stage="downloaded",
                 progress=5,
                 mode="import",
@@ -240,6 +241,7 @@ class JobWorker:
             # Non-Thai subtitle becomes the source; Gemini translates to Thai.
             db.update_job(
                 job_id,
+                status="queued",
                 stage="downloaded",
                 progress=5,
                 mode="import_pending",

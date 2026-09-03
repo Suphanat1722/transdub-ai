@@ -129,6 +129,9 @@ def test_resolve_youtube_language_sets_import_for_thai(monkeypatch, tmp_path: Pa
     assert job is not None
     assert job["mode"] == "import"
     assert job["stage"] == "downloaded"
+    # Must be queued so the worker loop picks it up for extraction; otherwise
+    # it hangs in "downloading" forever.
+    assert job["status"] == "queued"
     assert job["source_path"] is not None
     assert [c["text"] for c in job["cues"]] == ["สวัสดี", "ยินดีต้อนรับ"]
 
@@ -148,6 +151,7 @@ def test_resolve_youtube_language_sets_import_pending_for_non_thai(monkeypatch, 
     assert job is not None
     assert job["mode"] == "import_pending"
     assert job["stage"] == "downloaded"
+    assert job["status"] == "queued"
     assert job["source_cues"][0]["text"] == "Hello there"
     assert job["cues"] == []
 
