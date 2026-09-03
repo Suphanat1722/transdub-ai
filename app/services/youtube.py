@@ -11,6 +11,7 @@ Neither call needs a YouTube API key.
 from __future__ import annotations
 
 import re
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
@@ -103,6 +104,22 @@ def _base_options(target_dir: Path) -> dict:
     return options
 
 
+def _subtitle_options(outdir: Path) -> dict:
+    """yt-dlp options to fetch on-YouTube subtitles only (no video download)."""
+    options = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": PREFERRED_LANGUAGES,
+        "subtitlesformat": "srt",
+        "outtmpl": str(outdir / "sub.%(ext)s"),
+    }
+    proxy = _proxy_url()
+    if proxy:
+        options["proxy"] = proxy
+    return options
+
+
 def _download_attempts(target_dir: Path) -> list[dict]:
     """Candidate yt-dlp option sets, tried in order until one downloads a file.
 
@@ -157,47 +174,76 @@ def download_video(url: str, target_dir: Path) -> Path:
     raise YouTubeError(f"ดาวน์โหลดวิดีโอจาก YouTube ไม่สำเร็จ: {last_error}")
 
 
+def _attempt_subtitle(outdir: Path, url: str, language: str) -> str | None:
+    """Try to fetch ``language`` subtitles with yt-dlp; return SRT text or None.
+
+    Each language is fetched on its own so a rate-limit on a later language does
+    not discard an already-fetched one (seen as HTTP 429 when requesting
+    ``['th', 'en']`` together).
+    """
+    from yt_dlp import YoutubeDL
+
+    options = {**_subtitle_options(outdir), "subtitleslangs": [language]}
+    for stale in outdir.glob("sub.*"):
+        with suppress(OSError):
+            stale.unlink()
+    with YoutubeDL(options) as downloader:
+        downloader.download([url])
+    candidates = sorted(outdir.glob(f"sub.{language}.srt"))
+    if not candidates:
+        return None
+    text = candidates[0].read_text(encoding="utf-8", errors="replace").strip()
+    return text or None
+
+
 def fetch_subtitle(url: str) -> tuple[str, str]:
     """Fetch an available subtitle for ``url`` as SRT text plus its language code.
 
-    Thai is preferred, then English, then the first available track.  Raises
-    ``YouTubeError`` when the video has no captions or YouTube blocks the request.
+    Uses yt-dlp (the same tool that downloads the video) because it reliably
+    lists and fetches on-YouTube captions through the configured proxy, unlike
+    youtube-transcript-api which can fail with a blank response ("no element
+    found") on some videos.  Thai is preferred, then English, then the first
+    available track.  Each language is requested separately to avoid dropping an
+    already-fetched track to a 429 on a later one.
     """
-    video_id = extract_video_id(url)
-    if not video_id:
+    if not extract_video_id(url):
         raise YouTubeError("ลิงก์ YouTube ไม่ถูกต้อง")
     try:
-        from youtube_transcript_api.formatters import SRTFormatter
+        import yt_dlp  # noqa: F401  (ensures the dependency is importable)
     except ImportError as exc:
-        raise YouTubeError("ยังไม่ได้ติดตั้ง youtube-transcript-api") from exc
+        raise YouTubeError("ยังไม่ได้ติดตั้ง yt-dlp") from exc
 
-    transcript_api = _build_transcript_api()
+    outdir = Path(tempfile.mkdtemp(prefix="sub-"))
     try:
-        transcript_list = transcript_api.list(video_id)
-    except Exception as exc:
-        raise YouTubeError(f"อ่านรายการคำบรรยายจาก YouTube ไม่สำเร็จ: {exc}") from exc
+        for language in PREFERRED_LANGUAGES:
+            try:
+                text = _attempt_subtitle(outdir, url, language)
+            except Exception as exc:
+                message = str(exc)
+                if "IpBlocked" in message or "TooManyRequests" in message or "reload" in message:
+                    raise YouTubeError("YouTube บล็อก IP/จำกัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
+                continue
+            if text:
+                return text, language
 
-    transcript = None
-    for language in PREFERRED_LANGUAGES:
-        try:
-            transcript = transcript_list.find_transcript([language])
-            break
-        except Exception:
-            continue
-    if transcript is None:
-        try:
-            transcript = next(iter(transcript_list))
-        except Exception as exc:
-            raise YouTubeError("วิดีโอนี้ไม่มีคำบรรยายที่นำเข้าพากย์ได้") from exc
+        # Fallback: discover which tracks exist, then fetch the first available.
+        from yt_dlp import YoutubeDL
 
-    try:
-        data = transcript.fetch()
-        srt_content = SRTFormatter().format_transcript(data)
-    except Exception as exc:
-        message = str(exc)
-        if "IpBlocked" in message or "TooManyRequests" in message:
-            raise YouTubeError("YouTube บล็อก IP/จำกัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
-        raise YouTubeError(f"ดึงคำบรรยายไม่สำเร็จ: {message}") from exc
-    if not srt_content.strip():
-        raise YouTubeError("คำบรรยายที่ดึงได้ว่างเปล่า")
-    return srt_content, transcript.language_code
+        options = {**_subtitle_options(outdir), "writesubtitles": False, "writeautomaticsub": False}
+        with YoutubeDL(options) as downloader:
+            info = downloader.extract_info(url, download=False)
+        auto = info.get("automatic_captions") or {}
+        manual = info.get("subtitles") or {}
+        available = list(auto) or list(manual)
+        if not available:
+            raise YouTubeError("วิดีโอนี้ไม่มีคำบรรยายที่นำเข้าพากย์ได้")
+        text = _attempt_subtitle(outdir, url, available[0])
+        if not text:
+            raise YouTubeError("คำบรรยายที่ดึงได้ว่างเปล่า")
+        return text, available[0]
+    finally:
+        for stale in outdir.glob("sub.*"):
+            with suppress(OSError):
+                stale.unlink()
+        with suppress(OSError):
+            outdir.rmdir()
