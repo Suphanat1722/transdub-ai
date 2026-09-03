@@ -107,6 +107,39 @@ def test_build_transcript_api_no_proxy(monkeypatch) -> None:
     assert captured["kwargs"].get("proxy_config") is None
 
 
+def test_proxy_url_generic(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.youtube.youtube_proxy_settings",
+        lambda: ("", "", "http://user:pass@host:8080"),
+    )
+    assert youtube._proxy_url() == "http://user:pass@host:8080"
+
+
+def test_proxy_url_webshare_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.youtube.youtube_proxy_settings",
+        lambda: ("wsuser", "wspass", ""),
+    )
+    # Webshare must expand into a usable URL so yt-dlp (video download) and the
+    # transcript client share the same proxy.
+    assert youtube._proxy_url() == "http://wsuser:wspass@res.webshare.io:80/"
+
+
+def test_proxy_url_none(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.youtube.youtube_proxy_settings", lambda: ("", "", ""))
+    assert youtube._proxy_url() is None
+
+
+def test_download_options_uses_proxy_and_android_client(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "app.services.youtube.youtube_proxy_settings",
+        lambda: ("wsuser", "wspass", ""),
+    )
+    options = youtube._download_options(tmp_path)
+    assert options["proxy"] == "http://wsuser:wspass@res.webshare.io:80/"
+    assert options["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+
+
 def test_create_job_requires_valid_youtube_url(monkeypatch, tmp_path: Path) -> None:
     _setup(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:

@@ -48,6 +48,22 @@ def _sanitize_filename(value: str) -> str:
     return (cleaned or "video")[:120]
 
 
+def _proxy_url() -> str | None:
+    """Return a single proxy URL (Webshare residential or generic) or None.
+
+    Webshare credentials are expanded into the standard residential endpoint so
+    the same proxy can be reused by both the transcript client and yt-dlp when
+    downloading the video -- otherwise the video fetch would still hit YouTube
+    from the blocked IP and fail with a captcha/"reload" error.
+    """
+    webshare_user, webshare_pass, generic_url = youtube_proxy_settings()
+    if generic_url:
+        return generic_url
+    if webshare_user and webshare_pass:
+        return f"http://{webshare_user}:{webshare_pass}@res.webshare.io:80/"
+    return None
+
+
 def _build_transcript_api():
     """Build a YouTubeTranscriptApi, routing through a residential proxy when configured.
 
@@ -72,8 +88,7 @@ def _build_transcript_api():
 
 
 def _download_options(target_dir: Path) -> dict:
-    """yt-dlp options, adding a proxy URL when configured."""
-    _, _, generic_url = youtube_proxy_settings()
+    """yt-dlp options, using the same configured proxy and a captcha-avoiding client."""
     options = {
         "format": "bv*+ba/b",
         "outtmpl": str(target_dir / "youtube.%(ext)s"),
@@ -81,9 +96,14 @@ def _download_options(target_dir: Path) -> dict:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        # The Android player client is served without the interactive captcha
+        # that triggers YouTube's "page needs to be reloaded" error during
+        # plain web-client fetches.
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
-    if generic_url:
-        options["proxy"] = generic_url
+    proxy = _proxy_url()
+    if proxy:
+        options["proxy"] = proxy
     return options
 
 
