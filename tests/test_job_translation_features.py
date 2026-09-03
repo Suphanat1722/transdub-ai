@@ -21,7 +21,7 @@ def _setup(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(worker, "start", lambda: None)
     monkeypatch.setattr(worker, "stop", lambda: None)
     monkeypatch.setattr(worker, "wake", lambda: None)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
 
 
 def test_create_job_with_srt_sets_import_mode_and_cues(monkeypatch, tmp_path: Path) -> None:

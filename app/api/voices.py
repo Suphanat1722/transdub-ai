@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..repositories import database
 from ..services import edge_tts_synth
@@ -7,12 +7,15 @@ router = APIRouter(prefix="/api/voices", tags=["voices"])
 
 
 @router.get("")
-def voices() -> list[dict]:
-    """List preset Edge TTS voices. Reaches the network to fetch the current catalogue."""
+def voices(locale: str | None = Query(default=None, max_length=20)) -> list[dict]:
+    """List preset Edge TTS voices, optionally filtered by locale substring (e.g. ``th``)."""
     try:
         raw = edge_tts_synth.list_voices()
     except edge_tts_synth.EdgeTTSUnavailableError as exc:
         raise HTTPException(503, str(exc)) from exc
+    if locale:
+        needle = locale.strip().lower()
+        raw = [voice for voice in raw if needle in (voice.get("Locale") or "").lower()]
     result = []
     for voice in raw:
         result.append(

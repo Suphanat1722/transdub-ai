@@ -16,7 +16,7 @@
     <section class="hero">
       <p class="eyebrow">VIDEO → TRANSCRIPT → THAI → VOICE → MP4</p>
       <h1>เลือกวิดีโอครั้งเดียว<br><em>แล้วปล่อยให้ระบบพากย์จนจบ</em></h1>
-      <p>เสียงและโมเดลทำงานบนเครื่อง ข้อความสำหรับถอดและแปลเท่านั้นที่ส่งไป Gemini</p>
+      <p>ถอดเสียงและแปลด้วย Gemini · เสียงพากย์ไทยจาก Edge TTS · แยกเสียงพื้นหลังและประกอบวิดีโอบนเครื่องคุณ</p>
     </section>
 
     <section id="system-warning" class="warning" hidden></section>
@@ -38,6 +38,10 @@
               <strong>เลือกหรือลากไฟล์วิดีโอ</strong>
               <small id="video-name">รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB</small>
             </label>
+            <div class="voice-toolbar">
+              <input id="voice-search" type="search" placeholder="ค้นหาเสียงพากย์ เช่น Niwat, Premwadee">
+              <label class="check-inline"><input id="show-all-voices" type="checkbox"> แสดงเสียงภาษาอื่น</label>
+            </div>
             <div class="grid two">
               <label>เสียงพากย์ (Edge TTS)
                 <select id="voice-select" name="voice" required></select>
@@ -110,6 +114,29 @@
               <textarea id="translation-prompt" rows="6" placeholder="ว่าง = ใช้ค่าเริ่มต้นระบบ"></textarea>
               <button class="secondary" id="save-prompt">บันทึก prompt</button>
             </div>
+          </section>
+
+          <section class="card" id="job-settings" hidden>
+            <div class="card-head"><h3>ตั้งค่างาน</h3></div>
+            <div class="settings-grid">
+              <label>เสียงพากย์
+                <select id="job-voice"></select>
+              </label>
+              <label>อัตราการพูด <output id="job-rate-value">0%</output>
+                <input id="job-rate" type="range" min="-50" max="50" value="0">
+              </label>
+              <label>เสียงพื้นหลัง <output id="job-bg-value">100%</output>
+                <input id="job-bg" type="range" min="0" max="150" value="100">
+              </label>
+              <label>ระดับเสียงพากย์ <output id="job-voice-vol-value">100%</output>
+                <input id="job-voice-vol" type="range" min="0" max="150" value="100">
+              </label>
+              <label class="wide">โฟลเดอร์ส่งออกวิดีโอ
+                <input id="job-output-dir" placeholder="ว่าง = เก็บไว้ในโฟลเดอร์งาน">
+              </label>
+            </div>
+            <button class="secondary" id="save-job-settings">บันทึกการตั้งค่า</button>
+            <p class="muted-note">เปลี่ยนเสียงหรืออัตราการพูดจะลบเสียงที่สร้างไว้และสร้างใหม่ทั้งหมด (ข้อความและคำแปลคงเดิม) ส่วนระดับเสียงใช้ตอนมิกซ์ครั้งถัดไป</p>
           </section>
 
           <section class="card">

@@ -24,7 +24,7 @@ def configure_temp_data(monkeypatch, root: Path) -> None:
 
 def test_job_cues_chunks_usage_and_artifacts(monkeypatch, tmp_path: Path) -> None:
     configure_temp_data(monkeypatch, tmp_path)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
     video = tmp_path / "jobs" / "job" / "source" / "video.mp4"
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"video")
@@ -84,7 +84,7 @@ def test_job_cues_chunks_usage_and_artifacts(monkeypatch, tmp_path: Path) -> Non
     assert chunks[-1]["chunk_index"] == 2
 
     db.update_job("job", status="transcribing", stage="separated", wait_reason=None)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
     recovered = db.get_job("job", include_cues=False)
     assert recovered is not None
     assert recovered["status"] == "queued"
@@ -112,7 +112,7 @@ def _make_job(db, tmp_path: Path, job_id: str, cache_key: str | None) -> None:
 
 def test_delete_job_purges_unreferenced_audio_cache(monkeypatch, tmp_path: Path) -> None:
     configure_temp_data(monkeypatch, tmp_path)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
 
     cache = config.CACHE_DIR
     cache.mkdir(parents=True, exist_ok=True)
@@ -140,7 +140,7 @@ def test_delete_job_purges_unreferenced_audio_cache(monkeypatch, tmp_path: Path)
 
 def test_purge_cache_keeps_entries_referenced_by_other_jobs(monkeypatch, tmp_path: Path) -> None:
     configure_temp_data(monkeypatch, tmp_path)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
 
     cache = config.CACHE_DIR
     cache.mkdir(parents=True, exist_ok=True)

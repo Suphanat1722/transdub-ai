@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 
 from .audio import AudioError
@@ -20,14 +21,28 @@ from .audio import AudioError
 # WAV that the rest of the assembly pipeline expects (PCM s16le, SAMPLE_RATE,
 # single channel).
 EDGE_TTS_SAMPLE_RATE = 24_000
+# The voice catalogue rarely changes; cache it so /api/health and /api/voices
+# do not hit the network on every request.
+VOICE_CACHE_TTL_SECONDS = 600
+
+_voice_cache: tuple[float, list[dict]] | None = None
 
 
 class EdgeTTSUnavailableError(RuntimeError):
     """Raised when ``edge_tts`` is not installed or cannot reach its endpoint."""
 
 
-def list_voices() -> list[dict]:
-    """Return preset Edge voices (ShortName, Locale, Gender). Reaches the network."""
+def list_voices(force_refresh: bool = False) -> list[dict]:
+    """Return preset Edge voices (ShortName, Locale, Gender), cached briefly.
+
+    Reaches the network on a cache miss (first call or after the TTL expires);
+    ``force_refresh=True`` bypasses the cache.
+    """
+    global _voice_cache
+    if not force_refresh and _voice_cache is not None:
+        fetched_at, cached = _voice_cache
+        if time.monotonic() - fetched_at < VOICE_CACHE_TTL_SECONDS:
+            return cached
     try:
         import edge_tts
     except ImportError as exc:
@@ -37,9 +52,11 @@ def list_voices() -> list[dict]:
         return [dict(voice) for voice in asyncio.run(edge_tts.list_voices())]
 
     try:
-        return fetch()
+        voices = fetch()
     except Exception as exc:
         raise EdgeTTSUnavailableError(f"เรียกข้อมูลเสียงจาก Edge TTS ไม่สําเร็จ: {exc}") from exc
+    _voice_cache = (time.monotonic(), voices)
+    return voices
 
 
 def rate_kwargs(rate_percent: int) -> dict[str, str]:

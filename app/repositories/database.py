@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
 import sqlite3
 import threading
 import uuid
@@ -20,8 +18,6 @@ from ..core.config import (
     CACHE_MAX_BYTES,
     DB_PATH,
     EDGE_TTS_DEFAULT_VOICE,
-    IMPORTS_DIR,
-    JOBS_DIR,
     PIPELINE_REVISION,
     ROOT,
     data_relative,
@@ -97,7 +93,7 @@ def _run_alembic() -> None:
     command.upgrade(configuration, "head")
 
 
-def init_db(run_legacy_migration: bool = True) -> None:
+def init_db() -> None:
     if not _has_table("jobs"):
         from alembic import command
 
@@ -111,264 +107,14 @@ def init_db(run_legacy_migration: bool = True) -> None:
             "UPDATE cues SET status='pending',error='กู้คืน cue ที่หยุดระหว่างสร้างเสียง' WHERE status='processing'"
         )
         conn.execute(
-            "UPDATE jobs SET status=CASE WHEN status='pausing' THEN 'paused' "
-            "WHEN status='cancelling' THEN 'cancelled' ELSE 'queued' END,"
-            "current_cue_id=NULL,control_requested=NULL,"
-            "wait_reason='กู้คืนงานหลังเปิดโปรแกรมใหม่',next_attempt_at=NULL "
-            "WHERE engine='jaitts' AND status IN "
-            "('running','retrying','waiting_model','assembling','pausing','cancelling')"
-        )
-        conn.execute(
             "UPDATE jobs SET status='queued',control_requested=NULL,current_cue_id=NULL,"
             "wait_reason='กู้คืนงานหลังเปิดโปรแกรมใหม่',updated_at=? "
             "WHERE engine='transdub' AND status IN "
             "('extracting','separating','transcribing','translating','synthesizing','muxing','running')",
             (utc_now(),),
         )
-    if run_legacy_migration:
-        migrate_gemini_jobs()
-        cleanup_legacy_cache()
-        reset_reference_leak_outputs()
-        reset_legacy_timeline_outputs()
-        reset_mismatched_reference_outputs()
-        reset_short_articulation_outputs()
     migrate_paths_to_relative()
     cleanup_cache_index()
-
-
-def migrate_gemini_jobs() -> list[dict]:
-    from ..services.srt import parse_srt
-
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name='gemini_to_jaitts_v1'").fetchone():
-            return []
-        legacy = conn.execute("SELECT * FROM jobs WHERE model LIKE 'gemini%' AND engine='jaitts'").fetchall()
-    migrated: list[dict] = []
-    for row in legacy:
-        old_id = row["id"]
-        source = (JOBS_DIR / old_id / "source.srt").resolve()
-        if not source.is_file() or not source.is_relative_to(JOBS_DIR.resolve()):
-            raise RuntimeError(f"ไม่พบ SRT ต้นฉบับของงาน {old_id}; ยกเลิก migration เพื่อป้องกันข้อมูลสูญหาย")
-        raw = source.read_bytes()
-        digest = hashlib.sha256(raw).hexdigest()
-        safe_stem = "".join(c if c.isalnum() or c in "-_." else "_" for c in Path(row["filename"]).stem)[:80]
-        backup = IMPORTS_DIR / f"{safe_stem}-{digest[:12]}.srt"
-        if not backup.exists():
-            shutil.copy2(source, backup)
-        if hashlib.sha256(backup.read_bytes()).hexdigest() != digest:
-            raise RuntimeError("ตรวจสอบ hash ของ SRT สำรองไม่ผ่าน; ไม่ลบงานเดิม")
-        parsed = parse_srt(raw)
-        new_id = str(uuid.uuid4())
-        new_dir = JOBS_DIR / new_id
-        new_dir.mkdir(parents=True, exist_ok=False)
-        (new_dir / "source.srt").write_bytes(raw)
-        create_job(new_id, row["filename"], parsed.encoding, "edge-tts", parsed.warnings, parsed.cues)
-        with connect() as conn:
-            conn.execute("DELETE FROM jobs WHERE id=?", (old_id,))
-        old_dir = (JOBS_DIR / old_id).resolve()
-        if old_dir.is_dir() and old_dir.is_relative_to(JOBS_DIR.resolve()):
-            shutil.rmtree(old_dir)
-        migrated.append(
-            {"old_job_id": old_id, "new_job_id": new_id, "source_backup": str(backup), "sha256": digest}
-        )
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            ("gemini_to_jaitts_v1", utc_now(), json.dumps(migrated, ensure_ascii=False)),
-        )
-    return migrated
-
-
-def cleanup_legacy_cache() -> None:
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name='gemini_cache_cleanup_v1'").fetchone():
-            return
-        migrated = conn.execute(
-            "SELECT details_json FROM migrations WHERE name='gemini_to_jaitts_v1'"
-        ).fetchone()
-        paths = (
-            [row["path"] for row in conn.execute("SELECT path FROM audio_cache").fetchall()]
-            if migrated
-            else []
-        )
-        conn.execute("DELETE FROM audio_cache")
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            ("gemini_cache_cleanup_v1", utc_now(), json.dumps({"removed_entries": len(paths)})),
-        )
-    cache_root = CACHE_DIR.resolve()
-    for value in paths:
-        path = Path(value).resolve()
-        if path.is_file() and path.is_relative_to(cache_root):
-            path.unlink()
-
-
-def reset_reference_leak_outputs() -> list[dict]:
-    """Reset outputs generated before reference preprocessing and duration used the same audio."""
-    migration_name = "jaitts_reference_leak_v3"
-    generated_warnings = {
-        "เสียงยาวเกินช่วงหลังเร่งถึง 1.35 เท่า",
-        "ปลายเสียงยังมีพลังงานสูงหลังลองเพิ่มเวลา 3 ครั้ง กรุณาตรวจฟังและสร้างใหม่",
-    }
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name=?", (migration_name,)).fetchone():
-            return []
-        rows = conn.execute(
-            "SELECT c.id,c.job_id,c.warnings_json FROM cues c JOIN jobs j ON j.id=c.job_id "
-            "WHERE j.engine='jaitts' AND j.status!='cancelled' AND c.status='completed'"
-        ).fetchall()
-        affected: dict[str, int] = {}
-        for row in rows:
-            warnings = [
-                warning for warning in json.loads(row["warnings_json"]) if warning not in generated_warnings
-            ]
-            conn.execute(
-                "UPDATE cues SET status='pending',warnings_json=?,audio_path=NULL,"
-                "original_duration_ms=NULL,final_duration_ms=NULL,speed_factor=1.0,attempts=0,error=NULL "
-                "WHERE id=?",
-                (json.dumps(warnings, ensure_ascii=False), row["id"]),
-            )
-            affected[row["job_id"]] = affected.get(row["job_id"], 0) + 1
-        now = utc_now()
-        for job_id in affected:
-            conn.execute(
-                "UPDATE jobs SET status='paused',error=NULL,"
-                "wait_reason='รีเซ็ตเสียงเดิมที่มี reference นำหน้า กดทำต่อเพื่อสร้างใหม่',"
-                "next_attempt_at=NULL,completed_at=NULL,updated_at=? WHERE id=?",
-                (now, job_id),
-            )
-        details = [{"job_id": job_id, "reset_cues": count} for job_id, count in affected.items()]
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            (migration_name, now, json.dumps(details, ensure_ascii=False)),
-        )
-    return details
-
-
-def reset_legacy_timeline_outputs() -> list[dict]:
-    """Reset fitted cue files created before natural-duration timeline scheduling."""
-    migration_name = "jaitts_natural_timeline_v4"
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name=?", (migration_name,)).fetchone():
-            return []
-        rows = conn.execute(
-            "SELECT c.id,c.job_id,c.warnings_json FROM cues c JOIN jobs j ON j.id=c.job_id "
-            "WHERE j.engine='jaitts' AND j.status!='cancelled' AND c.status='completed'"
-        ).fetchall()
-        affected: dict[str, int] = {}
-        for row in rows:
-            warnings = [
-                warning
-                for warning in json.loads(row["warnings_json"])
-                if "เร่งถึง 1.35 เท่า" not in warning
-                and not warning.startswith("เสียงยังทับ cue ถัดไป")
-                and not warning.startswith("เสียงยาวถึง cue ถัดไป")
-            ]
-            conn.execute(
-                "UPDATE cues SET status='pending',warnings_json=?,audio_path=NULL,"
-                "original_duration_ms=NULL,final_duration_ms=NULL,speed_factor=1.0,attempts=0,error=NULL "
-                "WHERE id=?",
-                (json.dumps(warnings, ensure_ascii=False), row["id"]),
-            )
-            affected[row["job_id"]] = affected.get(row["job_id"], 0) + 1
-        now = utc_now()
-        for job_id in affected:
-            conn.execute(
-                "UPDATE jobs SET status='paused',error=NULL,"
-                "wait_reason='รีเซ็ตการจัดเวลาเดิม กดทำต่อเพื่อใช้ timeline แบบธรรมชาติ',"
-                "next_attempt_at=NULL,completed_at=NULL,updated_at=? WHERE id=?",
-                (now, job_id),
-            )
-        details = [{"job_id": job_id, "reset_cues": count} for job_id, count in affected.items()]
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            (migration_name, now, json.dumps(details, ensure_ascii=False)),
-        )
-    return details
-
-
-def reset_mismatched_reference_outputs() -> list[dict]:
-    """Reset speech generated from clipped reference audio paired with the full transcript."""
-    migration_name = "jaitts_matched_reference_v5"
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name=?", (migration_name,)).fetchone():
-            return []
-        rows = conn.execute(
-            "SELECT c.id,c.job_id,c.warnings_json FROM cues c JOIN jobs j ON j.id=c.job_id "
-            "WHERE j.engine='jaitts' AND j.status!='cancelled' AND c.status='completed'"
-        ).fetchall()
-        affected: dict[str, int] = {}
-        for row in rows:
-            warnings = [
-                warning
-                for warning in json.loads(row["warnings_json"])
-                if not warning.startswith("ปลายเสียงยังมีพลังงานสูง")
-                and not warning.startswith("เสียงยังทับ cue ถัดไป")
-                and not warning.startswith("เสียงยาวถึง cue ถัดไป")
-            ]
-            conn.execute(
-                "UPDATE cues SET status='pending',warnings_json=?,audio_path=NULL,"
-                "original_duration_ms=NULL,final_duration_ms=NULL,speed_factor=1.0,attempts=0,error=NULL "
-                "WHERE id=?",
-                (json.dumps(warnings, ensure_ascii=False), row["id"]),
-            )
-            affected[row["job_id"]] = affected.get(row["job_id"], 0) + 1
-        now = utc_now()
-        for job_id in affected:
-            conn.execute(
-                "UPDATE jobs SET status='paused',error=NULL,"
-                "wait_reason='รีเซ็ตเสียงที่ reference กับ transcript ไม่ตรงกัน กดทำต่อเพื่อสร้างใหม่',"
-                "next_attempt_at=NULL,completed_at=NULL,updated_at=? WHERE id=?",
-                (now, job_id),
-            )
-        details = [{"job_id": job_id, "reset_cues": count} for job_id, count in affected.items()]
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            (migration_name, now, json.dumps(details, ensure_ascii=False)),
-        )
-    return details
-
-
-def reset_short_articulation_outputs() -> list[dict]:
-    """Reset speech generated without a small end margin for complete articulation."""
-    migration_name = "jaitts_articulation_margin_v6"
-    with connect() as conn:
-        if conn.execute("SELECT 1 FROM migrations WHERE name=?", (migration_name,)).fetchone():
-            return []
-        rows = conn.execute(
-            "SELECT c.id,c.job_id,c.warnings_json FROM cues c JOIN jobs j ON j.id=c.job_id "
-            "WHERE j.engine='jaitts' AND j.status!='cancelled' AND c.status='completed'"
-        ).fetchall()
-        affected: dict[str, int] = {}
-        for row in rows:
-            warnings = [
-                warning
-                for warning in json.loads(row["warnings_json"])
-                if not warning.startswith("ปลายเสียงยังมีพลังงานสูง")
-                and not warning.startswith("เสียงยังทับ cue ถัดไป")
-                and not warning.startswith("เสียงยาวถึง cue ถัดไป")
-            ]
-            conn.execute(
-                "UPDATE cues SET status='pending',warnings_json=?,audio_path=NULL,"
-                "original_duration_ms=NULL,final_duration_ms=NULL,speed_factor=1.0,attempts=0,error=NULL "
-                "WHERE id=?",
-                (json.dumps(warnings, ensure_ascii=False), row["id"]),
-            )
-            affected[row["job_id"]] = affected.get(row["job_id"], 0) + 1
-        now = utc_now()
-        for job_id in affected:
-            conn.execute(
-                "UPDATE jobs SET status='paused',error=NULL,"
-                "wait_reason='รีเซ็ตเสียงสั้นที่มีเวลาออกเสียงไม่พอ กดทำต่อเพื่อสร้างใหม่',"
-                "next_attempt_at=NULL,completed_at=NULL,updated_at=? WHERE id=?",
-                (now, job_id),
-            )
-        details = [{"job_id": job_id, "reset_cues": count} for job_id, count in affected.items()]
-        conn.execute(
-            "INSERT INTO migrations(name,applied_at,details_json) VALUES(?,?,?)",
-            (migration_name, now, json.dumps(details, ensure_ascii=False)),
-        )
-    return details
 
 
 def migrate_paths_to_relative() -> None:
@@ -455,46 +201,6 @@ def row_dict(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row else None
 
 
-def create_job(
-    job_id: str, filename: str, encoding: str, model: str, warnings: list[str], cues: list
-) -> None:
-    now = utc_now()
-    seed = int.from_bytes(uuid.uuid4().bytes[:4], "big") & 0x7FFFFFFF
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO jobs(id,filename,encoding,model,status,warnings_json,created_at,updated_at,seed,engine,pipeline_revision) "
-            "VALUES(?,?,?,?,?,?,?,?,?,'jaitts',?)",
-            (
-                job_id,
-                filename,
-                encoding,
-                model,
-                "draft",
-                json.dumps(warnings, ensure_ascii=False),
-                now,
-                now,
-                seed,
-                PIPELINE_REVISION,
-            ),
-        )
-        conn.executemany(
-            "INSERT INTO cues(job_id,position,source_index,start_ms,end_ms,text,warnings_json,seed) VALUES(?,?,?,?,?,?,?,?)",
-            [
-                (
-                    job_id,
-                    c.position,
-                    c.source_index,
-                    c.start_ms,
-                    c.end_ms,
-                    c.text,
-                    json.dumps(c.warnings, ensure_ascii=False),
-                    (seed + c.position) & 0x7FFFFFFF,
-                )
-                for c in cues
-            ],
-        )
-
-
 def _translation_progress(conn, job_id: str) -> dict | None:
     rows = conn.execute(
         "SELECT chunk_index,status FROM translation_chunks WHERE job_id=? ORDER BY chunk_index",
@@ -532,7 +238,6 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
         if not job:
             return None
         job["warnings"] = json.loads(job.pop("warnings_json"))
-        job["glossary"] = json.loads(job.pop("glossary_json", "[]"))
         for key in (
             "pause_after_transcription",
             "pause_after_translation",
@@ -592,7 +297,6 @@ def list_jobs() -> list[dict]:
         for row in rows:
             item = dict(row)
             item["warnings"] = json.loads(item.pop("warnings_json"))
-            item["glossary"] = json.loads(item.pop("glossary_json", "[]"))
             for key in (
                 "pause_after_transcription",
                 "pause_after_translation",
@@ -661,8 +365,6 @@ def update_job(job_id: str, **fields) -> None:
         "current_cue_id",
         "active_output_revision",
         "pipeline_revision",
-        "glossary_json",
-        "glossary_revision",
         "translation_prompt",
         "mode",
         "source_path",
@@ -968,6 +670,24 @@ def source_cues(job_id: str) -> list[dict]:
         item["warnings"] = json.loads(item.pop("warnings_json", "[]"))
         result.append(item)
     return result
+
+
+def list_source_cues(job_id: str, *, offset: int = 0, limit: int = 100) -> tuple[list[dict], int]:
+    """Paginate source cues in SQL so long jobs do not load every row at once."""
+    with connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM source_cues WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM source_cues WHERE job_id=? ORDER BY position LIMIT ? OFFSET ?",
+            (job_id, limit, offset),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["warnings"] = json.loads(item.pop("warnings_json", "[]"))
+        result.append(item)
+    return result, total
 
 
 def update_source_cue(cue_id: int, *, text: str, start_ms: int, end_ms: int) -> dict | None:

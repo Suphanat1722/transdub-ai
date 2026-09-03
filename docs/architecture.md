@@ -20,6 +20,10 @@ TransDub AI เป็น local-first single-user application ตัว FastAPI, 
 5. FFmpeg แบ่งประกอบเป็น stem ละไม่เกิน 64 cue แล้ว mix stem พร้อม limiter ครั้งเดียว ทุกคําสั่งสั้นกว่า 20,000 ตัวอักษร
 6. WAV/MP3/JSON/CSV ถูกเขียนใน temporary output revision และเปิดใช้งานแบบ atomic เมื่อครบทั้งหมด โดย master ยาวอย่างน้อยถึง subtitle end สุดท้าย
 
+## Job settings after creation
+
+`PATCH /api/jobs/{id}` แก้เสียง/อัตราการพูด/ระดับเสียง/โฟลเดอร์ส่งออกของงานที่สร้างแล้ว การเปลี่ยนเสียงหรืออัตราการพูดจะลบเสียง cue ที่สร้างไว้และเพิ่ม `generation_revision` ของทุก cue (ซึ่งเข้าร่วม cache key) เพื่อให้ worker สร้างเสียงใหม่ทั้งหมดโดยไม่แตะ transcript/คำแปล ส่วนระดับเสียงและโฟลเดอร์ส่งออกมีผลตอนมิกซ์ครั้งถัดไป `GET /api/jobs/{id}/cues/{cue_id}/preview` ผสมเสียง cue กับเสียงพื้นหลังช่วงเวลาเดียวกันด้วย FFmpeg เพื่อให้ฟังตรวจก่อนยืนยันคำแปล
+
 ## Job state machine
 
 `queued → running → queued` ทําซ้ําต่อ cue เมื่อกด Pause จะตั้ง `control_requested=pause` และ worker acknowledge เป็น `paused` หลังจบ cue ปัจจุบัน Cancel ใช้กลไกเดียวกัน การประกอบใช้ `muxing` และห้ามลบโปรเจกต์ขณะมี cue `processing` หรืออยู่ใน active state
@@ -32,7 +36,7 @@ TransDub AI เป็น local-first single-user application ตัว FastAPI, 
 
 ## Model / service boundary
 
-- **Edge TTS** เป็นบริการคลาวด์ของ Microsoft ไม่มี weight ใน repository และไม่มี voice cloning ใช้เสียงพากย์สำเร็จรูปตาม `voice` ที่เลือกในงานเท่านั้น (ค่าเริ่มต้น `th-TH-NiwatNeural`)
+- **Edge TTS** เป็นบริการคลาวด์ของ Microsoft ไม่มี weight ใน repository และไม่มี voice cloning ใช้เสียงพากย์สำเร็จรูปตาม `voice` ที่เลือกในงานเท่านั้น (ค่าเริ่มต้น `th-TH-NiwatNeural`) รายการเสียงถูก cache ไว้ใน process 10 นาที เพื่อไม่ให้ `/api/health` และ `/api/voices` เรียก network ทุกครั้ง
 - Edge TTS ต้องเข้าถึงอินเทอร์เน็ตได้ ณ เวลาที่สร้างเสียง หากเข้าถึงไม่ได้ worker หน่วงและลองใหม่ (`waiting_quota`)
 - **Demucs** ยังทําบนเครื่องเพื่อแยก background stem ใช้ CUDA ได้ถ้ามี ไม่งั้น CPU
 - ข้อความ/เสียงสําหรับถอดความและแปลถูกส่งไป Gemini; เสียงพูดพากย์เองถูกสร้างผ่าน Edge TTS

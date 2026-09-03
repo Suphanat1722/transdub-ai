@@ -18,7 +18,7 @@ def test_create_read_pause_resume_job(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(worker, "start", lambda: None)
     monkeypatch.setattr(worker, "stop", lambda: None)
     monkeypatch.setattr(worker, "wake", lambda: None)
-    db.init_db(run_legacy_migration=False)
+    db.init_db()
 
     with TestClient(create_app()) as client:
         response = client.post(

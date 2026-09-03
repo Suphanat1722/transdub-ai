@@ -1,38 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class CueResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    id: int
-    position: int
-    source_index: str
-    start_ms: int
-    end_ms: int
-    text: str
-    status: str
-    warnings: list[str] = Field(default_factory=list)
-    inference_text: str | None = None
-
-
-class CuePageResponse(BaseModel):
-    items: list[CueResponse]
-    offset: int
-    limit: int
-    total: int
-
-
-class JobStatusResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    id: str
-    filename: str
-    status: str
-    total_cues: int
-    completed_cues: int
-    counts: dict[str, int]
-
-
 class JobActionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -72,62 +40,26 @@ class CueEditRequest(BaseModel):
         return value
 
 
-class GlossaryResponse(BaseModel):
-    rules: list["GlossaryRule"]
-    revision: int
+class TranslationPromptRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=50_000)
 
 
-class StartRequest(BaseModel):
-    voice: str = "th-TH-NiwatNeural"
-    tts_rate: int = Field(default=0, ge=-50, le=50)
+class JobSettingsRequest(BaseModel):
+    """Optional job-level settings changed after creation.
 
+    Changing ``voice`` or ``tts_rate`` invalidates generated cue audio so the
+    worker re-synthesizes every cue; volumes and output_dir take effect on the
+    next mux without any regeneration.
+    """
 
-class VoiceSettings(BaseModel):
-    voice: str = "th-TH-NiwatNeural"
-    tts_rate: int = Field(default=0, ge=-50, le=50)
+    voice: str | None = Field(default=None, min_length=1, max_length=200)
+    tts_rate: int | None = Field(default=None, ge=-50, le=50)
+    background_volume: float | None = Field(default=None, ge=0, le=150)
+    voice_volume: float | None = Field(default=None, ge=0, le=150)
+    output_dir: str | None = Field(default=None, max_length=500)
 
 
 class LocalSettings(BaseModel):
     max_start_delay_ms: int = Field(default=2000, ge=0, le=5000)
     voice: str = "th-TH-NiwatNeural"
     tts_rate: int = Field(default=0, ge=-50, le=50)
-
-
-class TranslationPromptRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=50_000)
-
-
-class RetryCueRequest(BaseModel):
-    duration_mode: str = "normal"
-
-    @field_validator("duration_mode")
-    @classmethod
-    def supported_mode(cls, value: str) -> str:
-        if value not in {"normal", "longer"}:
-            raise ValueError("duration_mode ต้องเป็น normal หรือ longer")
-        return value
-
-
-class GlossaryRule(BaseModel):
-    source: str = Field(min_length=1, max_length=100)
-    spoken: str = Field(min_length=1, max_length=200)
-
-    @field_validator("source", "spoken")
-    @classmethod
-    def strip_nonempty(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("คำใน glossary ห้ามว่าง")
-        return value
-
-
-class GlossaryRequest(BaseModel):
-    rules: list[GlossaryRule] = Field(default_factory=list, max_length=500)
-
-    @field_validator("rules")
-    @classmethod
-    def unique_sources(cls, value: list[GlossaryRule]) -> list[GlossaryRule]:
-        sources = [rule.source for rule in value]
-        if len(sources) != len(set(sources)):
-            raise ValueError("source ใน glossary ห้ามซ้ำ")
-        return value

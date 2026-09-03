@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.config import MAX_END_SPEED, SAMPLE_RATE
+from app.core.config import SAMPLE_RATE
 from app.services.audio import (
     INLINE_FILTER_LIMIT,
     _filter_complex_args,
@@ -59,11 +59,9 @@ def test_last_cue_keeps_its_natural_duration(tmp_path):
 def test_final_cue_can_speed_to_1_5(tmp_path):
     source, output = tmp_path / "raw.wav", tmp_path / "fit.wav"
     write_pcm_wav(source, tone(3000))
-    # A long final cue with a narrow slot forces the higher 1.5 end cap.
-    final_ms, speed, overlap = fit_before_next_start(
-        source, output, 1800, max_speed=MAX_END_SPEED
-    )
-    assert speed == MAX_END_SPEED
+    # A long final cue with a narrow slot allows a caller-provided higher cap.
+    final_ms, speed, overlap = fit_before_next_start(source, output, 1800, max_speed=1.5)
+    assert speed == 1.5
     assert 1700 <= final_ms <= 1900
     assert not overlap
 

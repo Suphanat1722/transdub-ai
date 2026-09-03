@@ -18,7 +18,6 @@ DB_PATH = DATA_DIR / "app.db"
 STATIC_DIR = ROOT / "app" / "static"
 
 EDGE_TTS_DEFAULT_VOICE = "th-TH-NiwatNeural"
-EDGE_TTS_RATE_STEP = 5
 # Edge TTS rate is raised in these steps (percent) until a cue fits its slot
 # without cutting words, capped at MAX_TTS_RATE.
 RATE_STEP = 10
@@ -39,7 +38,6 @@ SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
 MAX_SPEED = 1.25
-MAX_END_SPEED = 1.5
 CACHE_FORMAT_REVISION = "edge-tts-v1"
 CACHE_MAX_AGE_DAYS = 30
 CACHE_MAX_BYTES = 10 * 1024**3

@@ -15,9 +15,6 @@ class MediaError(RuntimeError):
     """An error that can be shown safely in the web UI."""
 
 
-ProgressCallback = Callable[[str, int, str], None]
-
-
 @dataclass(frozen=True)
 class MediaInfo:
     duration: float
@@ -179,6 +176,55 @@ def create_background_stem(
     return target, device
 
 
+def mix_cue_preview(
+    background_path: Path,
+    voice_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    background_volume: float,
+    voice_volume: float,
+) -> None:
+    """Mix one cue's voice with the background segment under it for review.
+
+    Used by the cue-preview endpoint so the user can hear dub and background
+    together (with the job's volume settings) before committing to a full mux.
+    """
+    duration_text = f"{duration_seconds:.3f}"
+    filters = (
+        f"[0:a]aformat=sample_rates=24000:channel_layouts=mono,"
+        f"volume={background_volume / 100.0:.4f}[bg];"
+        f"[1:a]aformat=sample_rates=24000:channel_layouts=mono,"
+        f"volume={voice_volume / 100.0:.4f}[voice];"
+        f"[bg][voice]amix=inputs=2:duration=longest:normalize=0,"
+        f"alimiter=limit=0.95:latency=1,atrim=0:{duration_text}[outa]"
+    )
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-t",
+            duration_text,
+            "-i",
+            str(background_path),
+            "-i",
+            str(voice_path),
+            "-filter_complex",
+            filters,
+            "-map",
+            "[outa]",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ],
+        error_prefix="ผสมเสียงตัวอย่างไม่สำเร็จ",
+    )
+
+
 def _volume(value: float) -> str:
     return f"{value / 100.0:.4f}"
 
@@ -252,57 +298,3 @@ def mix_output(
             return False
         except MediaError as encode_error:
             raise MediaError(f"{encode_error} (การคัดลอกภาพเดิมล้มเหลวด้วย: {copy_error})") from encode_error
-
-
-def process_media(
-    video_path: Path,
-    replacement_audio_path: Path,
-    output_path: Path,
-    work_dir: Path,
-    background_volume: float,
-    voice_volume: float,
-    progress: ProgressCallback,
-) -> dict[str, object]:
-    progress("validating", 5, "กำลังตรวจสอบไฟล์")
-    video_info = probe_media(video_path)
-    replacement_info = probe_media(replacement_audio_path)
-    if not video_info.has_video:
-        raise MediaError("ไฟล์วิดีโอไม่มีภาพ")
-    if not video_info.has_audio:
-        raise MediaError("ไฟล์วิดีโอไม่มีแทร็กเสียงเดิม")
-    if not replacement_info.has_audio:
-        raise MediaError("ไฟล์เสียงใหม่ไม่มีแทร็กเสียงที่อ่านได้")
-
-    progress("extracting", 20, "กำลังดึงเสียงเดิมจากวิดีโอ")
-    original_audio = work_dir / "original_audio.wav"
-    extract_original_audio(video_path, original_audio)
-
-    progress("separating", 35, "กำลังแยกเสียงพูดออกจากเสียงพื้นหลัง")
-    separation_root = work_dir / "separated"
-    background, device = separate_background(
-        original_audio,
-        separation_root,
-        notify=lambda message: progress("separating", 50, message),
-    )
-
-    progress("mixing", 80, "กำลังมิกซ์เสียงใหม่และประกอบวิดีโอ")
-    stream_copied = mix_output(
-        video_path,
-        background,
-        replacement_audio_path,
-        output_path,
-        video_info.duration,
-        background_volume,
-        voice_volume,
-    )
-    progress("mixing", 96, "กำลังตรวจสอบไฟล์ผลลัพธ์")
-    result_info = probe_media(output_path)
-    if not result_info.has_video or not result_info.has_audio:
-        raise MediaError("ไฟล์ผลลัพธ์ไม่สมบูรณ์")
-    if abs(result_info.duration - video_info.duration) > 0.15:
-        raise MediaError("ความยาวไฟล์ผลลัพธ์ไม่ตรงกับวิดีโอต้นฉบับ")
-    return {
-        "duration": video_info.duration,
-        "device": device,
-        "video_stream_copied": stream_copied,
-    }

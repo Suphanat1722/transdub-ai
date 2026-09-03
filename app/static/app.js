@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { jobs: [], current: null, layer: "source", offset: 0, limit: 100, events: null };
+const state = { jobs: [], current: null, layer: "source", offset: 0, limit: 100, events: null, voices: [], defaultVoice: "" };
+const ACTIVE_STATUSES = ["queued", "running", "extracting", "separating", "transcribing", "translating", "synthesizing", "muxing", "waiting_quota"];
 
 const stageNames = {
   uploaded: "รับไฟล์", extracted: "แยกแทร็ก", separated: "ตัดเสียงพูด",
@@ -43,6 +44,13 @@ function formatSize(bytes) {
   return `${value.toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
+function formatMs(ms) {
+  const value = Math.max(0, Math.round(Number(ms) || 0));
+  const h = Math.floor(value / 3_600_000), m = Math.floor((value % 3_600_000) / 60_000);
+  const s = Math.floor((value % 60_000) / 1000), rest = value % 1000;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(rest).padStart(3, "0")}`;
+}
+
 async function loadHealth() {
   try {
     const health = await api("/api/health");
@@ -60,19 +68,49 @@ async function loadHealth() {
 
 async function loadVoices() {
   try {
-    const voices = await api("/api/voices");
-    const defaultSettings = await api("/api/voices/default");
-    const select = $("#voice-select");
-    if (!voices.length) {
-      select.innerHTML = '<option value="">ไม่พบเสียง (Edge TTS เข้าถึงไม่ได้)</option>';
-      return;
-    }
-    select.innerHTML = voices.map((voice) =>
-      `<option value="${escapeHtml(voice.short_name)}">${escapeHtml(voice.label)}</option>`
-    ).join("");
-    const preferred = defaultSettings.voice;
-    if (preferred) select.value = preferred;
-  } catch (error) { $("#voice-select").innerHTML = '<option value="">ไม่สามารถโหลดเสียงได้</option>'; }
+    const [voices, defaults] = await Promise.all([api("/api/voices"), api("/api/voices/default")]);
+    state.voices = voices;
+    state.defaultVoice = defaults.voice || "";
+  } catch (error) { state.voices = []; state.defaultVoice = ""; }
+  renderVoiceSelects();
+  const select = $("#voice-select");
+  if (state.defaultVoice && [...select.options].some((option) => option.value === state.defaultVoice)) {
+    select.value = state.defaultVoice;
+  }
+  if (state.current) fillJobSettingsInputs(state.current);
+}
+
+function voiceGroups(showAll, filter) {
+  const needle = (filter || "").trim().toLowerCase();
+  const matches = (voice) => !needle
+    || voice.short_name.toLowerCase().includes(needle)
+    || (voice.locale || "").toLowerCase().includes(needle);
+  const thai = state.voices.filter((voice) => (voice.locale || "").toLowerCase().startsWith("th") && matches(voice));
+  const others = showAll
+    ? state.voices.filter((voice) => !(voice.locale || "").toLowerCase().startsWith("th") && matches(voice))
+    : [];
+  return { thai, others };
+}
+
+function populateVoiceSelect(select, showAll, filter) {
+  if (!select) return;
+  const { thai, others } = voiceGroups(showAll, filter);
+  if (!thai.length && !others.length) {
+    select.innerHTML = `<option value="">${state.voices.length ? "ไม่พบเสียงที่ค้นหา" : "ไม่พบเสียง (Edge TTS เข้าถึงไม่ได้)"}</option>`;
+    return;
+  }
+  const option = (voice) => `<option value="${escapeHtml(voice.short_name)}">${escapeHtml(voice.label)}</option>`;
+  select.innerHTML =
+    `<optgroup label="เสียงไทย">${thai.map(option).join("")}</optgroup>` +
+    (others.length ? `<optgroup label="เสียงภาษาอื่น">${others.map(option).join("")}</optgroup>` : "");
+}
+
+function renderVoiceSelects() {
+  const showAll = $("#show-all-voices")?.checked;
+  const filter = $("#voice-search")?.value;
+  populateVoiceSelect($("#voice-select"), showAll, filter);
+  populateVoiceSelect($("#job-voice"), true, "");
+  if (state.current) fillJobSettingsInputs(state.current);
 }
 
 async function loadJobs() {
@@ -114,7 +152,14 @@ async function openJob(id) {
   if (!["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) {
     state.events = new EventSource(`/api/jobs/${id}/events`);
     state.events.onmessage = async (event) => {
-      state.current = JSON.parse(event.data); renderJob(); await loadJobs(); await loadCues();
+      const previous = state.current;
+      state.current = JSON.parse(event.data);
+      renderJob(); await loadJobs();
+      if (state.layer === "translation" && previous && state.current.total_cues !== previous.total_cues) {
+        await loadCues();       // the translation layer was (re)built: re-render the page
+      } else {
+        syncCueRows();          // same set of cues: patch status bits in place
+      }
       if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) state.events.close();
     };
   }
@@ -140,7 +185,7 @@ function renderJob() {
   const current = Math.max(0, order.indexOf(job.stage));
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
   $("#job-warnings").innerHTML = (job.warnings || []).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
-  renderActions(job); renderArtifacts(job.artifacts || []); renderTranslationTools(job);
+  renderActions(job); renderArtifacts(job.artifacts || []); renderTranslationTools(job); renderJobSettings(job);
 }
 
 function renderTranslationTools(job) {
@@ -162,6 +207,63 @@ async function savePrompt() {
   } catch (error) { toast(error.message, true); }
 }
 
+function renderJobSettings(job) {
+  const card = $("#job-settings");
+  card.hidden = false;
+  const editable = !ACTIVE_STATUSES.includes(job.status);
+  $("#save-job-settings").disabled = !editable;
+  $("#save-job-settings").textContent = editable ? "บันทึกการตั้งค่า" : "งานกำลังเดิน หยุดก่อนแก้ตั้งค่า";
+  // Don't clobber inputs the user is currently editing (SSE fires every second).
+  if (card.contains(document.activeElement) && document.activeElement !== card) return;
+  fillJobSettingsInputs(job);
+}
+
+function fillJobSettingsInputs(job) {
+  const select = $("#job-voice");
+  populateVoiceSelect(select, true, "");
+  const currentVoice = job.voice || state.defaultVoice || "";
+  if (currentVoice && ![...select.options].some((option) => option.value === currentVoice)) {
+    const option = document.createElement("option");
+    option.value = currentVoice; option.textContent = currentVoice;
+    select.appendChild(option);
+  }
+  select.value = currentVoice;
+  $("#job-rate").value = job.tts_rate || 0;
+  $("#job-rate-value").textContent = `${job.tts_rate || 0}%`;
+  $("#job-bg").value = job.background_volume ?? 100;
+  $("#job-bg-value").textContent = `${job.background_volume ?? 100}%`;
+  $("#job-voice-vol").value = job.voice_volume ?? 100;
+  $("#job-voice-vol-value").textContent = `${job.voice_volume ?? 100}%`;
+  $("#job-output-dir").value = job.output_dir || "";
+}
+
+async function saveJobSettings() {
+  const job = state.current; if (!job) return;
+  const body = {};
+  const voice = $("#job-voice").value;
+  const rate = Number($("#job-rate").value);
+  const bg = Number($("#job-bg").value);
+  const voiceVolume = Number($("#job-voice-vol").value);
+  const outputDir = $("#job-output-dir").value.trim();
+  if (voice && voice !== job.voice) body.voice = voice;
+  if (rate !== Number(job.tts_rate || 0)) body.tts_rate = rate;
+  if (bg !== Number(job.background_volume ?? 100)) body.background_volume = bg;
+  if (voiceVolume !== Number(job.voice_volume ?? 100)) body.voice_volume = voiceVolume;
+  if (outputDir !== (job.output_dir || "")) body.output_dir = outputDir;
+  if (!Object.keys(body).length) { toast("ยังไม่มีอะไรเปลี่ยน"); return; }
+  if ((body.voice || body.tts_rate !== undefined) && job.total_cues) {
+    if (!confirm("เปลี่ยนเสียง/อัตราการพูดจะลบเสียงที่สร้างไว้และสร้างใหม่ทั้งหมด (ข้อความและคำแปลคงเดิม) ทำต่อไหม?")) return;
+  }
+  try {
+    state.current = await api(`/api/jobs/${job.id}`, {
+      method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    toast("บันทึกการตั้งค่าแล้ว");
+    renderJob(); renderJobList();
+    if (body.voice || body.tts_rate !== undefined) syncCueRows();
+  } catch (error) { toast(error.message, true); }
+}
+
 function renderTranslationProgress(job) {
   const box = $("#translate-progress");
   if (!box) return;
@@ -180,8 +282,7 @@ function renderTranslationProgress(job) {
 
 function renderActions(job) {
   const actions = [];
-  const activeList = ["queued", "running", "extracting", "separating", "transcribing", "translating", "synthesizing", "muxing", "waiting_quota"];
-  const active = activeList.includes(job.status);
+  const active = ACTIVE_STATUSES.includes(job.status);
   if (active) actions.push(["pause", "พัก"], ["cancel", "ยกเลิก"]);
   if (["paused", "waiting_quota"].includes(job.status)) actions.push(["resume", "ทําต่อ"]);
   if (["failed", "needs_review"].includes(job.status)) actions.push(["retry", "ลองต่อ"]);
@@ -226,11 +327,12 @@ async function loadCues() {
   const data = await api(`/api/jobs/${state.current.id}/cues?layer=${state.layer}&offset=${state.offset}&limit=${state.limit}`);
   $("#cue-list").innerHTML = data.items.length ? data.items.map((cue) => `
     <article class="cue" data-id="${cue.id}">
-      <div class="cue-meta"><b>#${cue.position}</b><input class="start" type="number" value="${cue.start_ms}" min="0"><span>→</span><input class="end" type="number" value="${cue.end_ms}" min="1"><small>ms</small></div>
+      <div class="cue-meta"><b>#${cue.position}</b><input class="start" type="number" value="${cue.start_ms}" min="0"><span>→</span><input class="end" type="number" value="${cue.end_ms}" min="1"><small>ms</small><small class="t-read"></small></div>
       <textarea>${escapeHtml(cue.text)}</textarea>
       <div class="cue-foot"><span>${(cue.warnings || []).map(escapeHtml).join(" · ")}</span>
         <span class="cue-btns">
           ${cue.status === "completed" && cue.audio_path ? `<button class="cue-play" title="ฟังเสียง">▶</button>` : ""}
+          ${hasBackground() && state.layer === "translation" && cue.status === "completed" && cue.audio_path ? `<button class="cue-preview" title="ฟังเสียงพูดผสมเสียงพื้นหลัง">🎚</button>` : ""}
           ${state.layer === "translation" ? `<button class="cue-regenerate" title="สร้างเสียงใหม่">↻</button>` : ""}
           <button class="save-cue">บันทึก</button>
         </span>
@@ -241,14 +343,70 @@ async function loadCues() {
   $("#prev-page").disabled = data.offset === 0; $("#next-page").disabled = data.offset + data.limit >= data.total;
   document.querySelectorAll(".save-cue").forEach((button) => button.onclick = () => saveCue(button.closest(".cue")));
   document.querySelectorAll(".cue-play").forEach((button) => button.onclick = () => playCueAudio(button.closest(".cue")));
+  document.querySelectorAll(".cue-preview").forEach((button) => button.onclick = () => playCuePreview(button.closest(".cue")));
   document.querySelectorAll(".cue-regenerate").forEach((button) => button.onclick = () => regenerateCue(button.closest(".cue")));
+  document.querySelectorAll(".cue").forEach((article) => {
+    const updateReadout = () => {
+      const start = Number(article.querySelector(".start").value || 0);
+      const end = Number(article.querySelector(".end").value || 0);
+      article.querySelector(".t-read").textContent = `${formatMs(start)} → ${formatMs(end)}`;
+    };
+    article.querySelector(".start").oninput = updateReadout;
+    article.querySelector(".end").oninput = updateReadout;
+    updateReadout();
+  });
+}
+
+function hasBackground() {
+  return (state.current?.artifacts || []).some((item) => item.kind === "background");
+}
+
+function makeCueButton(article, className, title, text, handler) {
+  const button = document.createElement("button");
+  button.className = className; button.title = title; button.textContent = text;
+  button.onclick = () => handler(button.closest(".cue"));
+  article.querySelector(".cue-btns").prepend(button);
+}
+
+function syncCueRows() {
+  // Patch status-dependent bits of the rendered cue rows (warnings, play
+  // buttons) without re-rendering the whole list, so scroll and edits survive.
+  if (!state.current) return;
+  const cuesById = new Map((state.current.cues || []).map((cue) => [String(cue.id), cue]));
+  document.querySelectorAll(".cue").forEach((article) => {
+    const cue = cuesById.get(article.dataset.id);
+    if (!cue) return;
+    article.querySelector(".cue-foot span:first-child").textContent = (cue.warnings || []).join(" · ");
+    const playable = cue.status === "completed" && cue.audio_path;
+    if (playable && !article.querySelector(".cue-play")) {
+      makeCueButton(article, "cue-play", "ฟังเสียง", "▶", playCueAudio);
+    }
+    if (!playable) article.querySelector(".cue-play")?.remove();
+    if (playable && hasBackground() && state.layer === "translation" && !article.querySelector(".cue-preview")) {
+      makeCueButton(article, "cue-preview", "ฟังเสียงพูดผสมเสียงพื้นหลัง", "🎚", playCuePreview);
+    }
+    if (!playable || !hasBackground() || state.layer !== "translation") {
+      article.querySelector(".cue-preview")?.remove();
+    }
+  });
+}
+
+async function refreshJob() {
+  if (!state.current) return;
+  state.current = await api(`/api/jobs/${state.current.id}`);
+  renderJob(); renderJobList();
 }
 
 async function playCueAudio(element) {
-  const id = element.dataset.id;
-  const url = `/api/jobs/${state.current.id}/cues/${id}/audio`;
+  const url = `/api/jobs/${state.current.id}/cues/${element.dataset.id}/audio`;
   const audio = new Audio(url);
   audio.play().catch(() => toast("ไม่สามารถเล่นเสียงได้", true));
+}
+
+function playCuePreview(element) {
+  const url = `/api/jobs/${state.current.id}/cues/${element.dataset.id}/preview`;
+  const audio = new Audio(url);
+  audio.play().catch(() => toast("ผสมเสียงตัวอย่างไม่สำเร็จ", true));
 }
 
 async function regenerateCue(element) {
@@ -259,11 +417,17 @@ async function regenerateCue(element) {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ action: "regenerate_cue", cue_id: Number(id) }),
     });
-    toast("กําลังสร้างเสียง cue ใหม่"); await openJob(state.current.id);
+    toast("กําลังสร้างเสียง cue ใหม่");
+    await refreshJob(); syncCueRows();
   } catch (error) { toast(error.message, true); }
 }
 
 async function saveCue(element) {
+  // Editing the source layer discards the whole translation layer downstream;
+  // say so before doing it.
+  if (state.layer === "source" && state.current.cues?.length) {
+    if (!confirm("การแก้ต้นฉบับจะลบคำแปลและเสียงที่สร้างไว้ทั้งหมด แล้วแปล/สร้างเสียงใหม่ บันทึกต่อไหม?")) return;
+  }
   try {
     await api(`/api/jobs/${state.current.id}/cues/${element.dataset.id}`, {
       method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
@@ -271,7 +435,8 @@ async function saveCue(element) {
         start_ms: Number(element.querySelector(".start").value), end_ms: Number(element.querySelector(".end").value),
       }),
     });
-    toast("บันทึก cue แล้ว และล้างผลลัพธ์ถัดไปที่เกี่ยวข้อง"); await openJob(state.current.id);
+    toast("บันทึก cue แล้ว และล้างผลลัพธ์ถัดไปที่เกี่ยวข้อง");
+    await refreshJob(); syncCueRows();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -293,12 +458,18 @@ $("#job-form").onsubmit = (event) => {
 
 $("#video").onchange = (event) => { const file = event.target.files[0]; $("#video-name").textContent = file ? `${file.name} · ${formatSize(file.size)}` : "รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB"; };
 function bindRanges() {
-  document.querySelectorAll('input[type="range"]').forEach((input) => input.oninput = () => {
+  document.querySelectorAll('#job-form input[type="range"]').forEach((input) => input.oninput = () => {
     const label = input.name === "voice_volume" ? "voice" : input.name === "tts_rate" ? "tts-rate" : "background";
     $(`#${label}-value`).textContent = `${input.value}%`;
   });
+  $("#job-rate").oninput = () => { $("#job-rate-value").textContent = `${$("#job-rate").value}%`; };
+  $("#job-bg").oninput = () => { $("#job-bg-value").textContent = `${$("#job-bg").value}%`; };
+  $("#job-voice-vol").oninput = () => { $("#job-voice-vol-value").textContent = `${$("#job-voice-vol").value}%`; };
 }
 bindRanges();
+$("#voice-search").oninput = renderVoiceSelects;
+$("#show-all-voices").onchange = renderVoiceSelects;
+$("#save-job-settings").onclick = saveJobSettings;
 document.querySelectorAll(".tabs button").forEach((button) => button.onclick = async () => { document.querySelectorAll(".tabs button").forEach((item) => item.classList.remove("active")); button.classList.add("active"); state.layer = button.dataset.layer; state.offset = 0; await loadCues(); });
 $("#prev-page").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadCues(); };
 $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };

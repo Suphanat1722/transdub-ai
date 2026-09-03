@@ -13,11 +13,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from ..core.config import JOBS_DIR, MAX_VIDEO_BYTES, resolve_data_path
 from ..repositories import database as db
+from ..services.media import MediaError, mix_cue_preview
 from ..services.srt import SrtValidationError, parse_srt
 from ..services.translation import serialize_srt
 from ..services.worker import worker
 from .dependencies import require_job
-from .schemas import CueEditRequest, JobActionRequest, TranslationPromptRequest
+from .schemas import CueEditRequest, JobActionRequest, JobSettingsRequest, TranslationPromptRequest
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
@@ -67,7 +68,8 @@ def pick_export_folder() -> dict:
         logger.warning("เปิด dialog เลือกโฟลเดอร์ไม่สำเร็จ: %s", exc)
         raise HTTPException(500, f"เปิด dialog เลือกโฟลเดอร์ไม่สำเร็จ: {exc}") from exc
     if not folder:
-        raise HTTPException(400, "ไม่ได้เลือกโฟลเดอร์")
+        # The user dismissed the dialog; not an error worth a red toast.
+        return {"path": None}
     if not os.path.isdir(folder):
         raise HTTPException(400, f"โฟลเดอร์นี้ไม่มีอยู่จริง: {folder}")
     return {"path": folder}
@@ -324,8 +326,8 @@ def cues(
     if offset < 0 or not 1 <= limit <= 200:
         raise HTTPException(422, "offset/limit ไม่ถูกต้อง")
     if layer == "source":
-        rows = db.source_cues(job_id)
-        return {"items": rows[offset : offset + limit], "offset": offset, "limit": limit, "total": len(rows)}
+        rows, total = db.list_source_cues(job_id, offset=offset, limit=limit)
+        return {"items": rows, "offset": offset, "limit": limit, "total": total}
     rows, total = db.list_cues(job_id, offset=offset, limit=limit)
     return {"items": rows, "offset": offset, "limit": limit, "total": total}
 
@@ -440,6 +442,80 @@ def update_translation_prompt(job_id: str, request: TranslationPromptRequest) ->
     return public_job(require_job(job_id, include_cues=False))
 
 
+def _invalidate_generated_audio(job_id: str) -> None:
+    """Drop all synthesized cue audio so the worker regenerates every cue.
+
+    Source cues and the Thai translation are kept intact; only speech and
+    downstream outputs (dub, report, video) are discarded.
+    """
+    shutil.rmtree(JOBS_DIR / job_id / "cues", ignore_errors=True)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE cues SET status='pending',audio_path=NULL,original_duration_ms=NULL,"
+            "final_duration_ms=NULL,speed_factor=1.0,error=NULL,"
+            "generation_revision=generation_revision+1 WHERE job_id=?",
+            (job_id,),
+        )
+    db.delete_artifacts(
+        job_id, {"dub_wav", "dub_mp3", "report_json", "report_csv", "final_video"}
+    )
+    db.update_job(
+        job_id,
+        stage="translated",
+        dub_audio_path=None,
+        output_video_path=None,
+        progress=55,
+    )
+
+
+@router.patch("/{job_id}")
+def update_job_settings(job_id: str, request: JobSettingsRequest) -> dict:
+    """Change voice/rate/volumes/output folder of an existing job.
+
+    A voice or rate change re-synthesizes all cues (text stays untouched);
+    volume and output_dir changes take effect on the next mux.
+    """
+    job = require_job(job_id, include_cues=False)
+    if job["status"] in ACTIVE:
+        raise HTTPException(409, "หยุดงานก่อนแก้ตั้งค่า")
+    updates: dict[str, object] = {}
+    if request.voice is not None:
+        updates["voice"] = request.voice.strip()
+    if request.tts_rate is not None:
+        updates["tts_rate"] = request.tts_rate
+    if request.background_volume is not None:
+        updates["background_volume"] = request.background_volume
+    if request.voice_volume is not None:
+        updates["voice_volume"] = request.voice_volume
+    if request.output_dir is not None:
+        export_dir = request.output_dir.strip() or None
+        if export_dir and not os.path.isdir(export_dir):
+            raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {export_dir}")
+        updates["output_dir"] = export_dir
+    if not updates:
+        return public_job(job)
+
+    voice_changed = (
+        request.voice is not None and request.voice.strip() != job.get("voice")
+    ) or (
+        request.tts_rate is not None and request.tts_rate != int(job.get("tts_rate") or 0)
+    )
+    if voice_changed and job["total_cues"] and job["stage"] in {"translated", "synthesizing", "synthesized", "completed"}:
+        _invalidate_generated_audio(job_id)
+        status = (
+            "reviewing_translation"
+            if job.get("pause_after_translation") and not job.get("translation_approved")
+            else "queued"
+        )
+        updates["status"] = status
+        updates["wait_reason"] = None
+        updates["error"] = None
+    db.update_job(job_id, **updates)
+    if updates.get("status") == "queued":
+        worker.wake()
+    return public_job(require_job(job_id, include_cues=False))
+
+
 @router.get("/{job_id}/artifacts/{kind}")
 def artifact(job_id: str, kind: str) -> FileResponse:
     job = require_job(job_id, include_cues=False)
@@ -469,6 +545,45 @@ def cue_audio(job_id: str, cue_id: int) -> FileResponse:
     if not path.is_file() or not path.is_relative_to((JOBS_DIR / job_id).resolve()):
         raise HTTPException(404, "ไม่พบเสียง cue")
     return FileResponse(path, media_type="audio/wav")
+
+
+@router.get("/{job_id}/cues/{cue_id}/preview")
+def cue_preview(job_id: str, cue_id: int) -> FileResponse:
+    """Mix one cue's voice with the background segment under it, for a quick listen."""
+    job = require_job(job_id)
+    cue = next((item for item in job["cues"] if item["id"] == cue_id), None)
+    if not cue or cue["status"] != "completed" or not cue.get("audio_path"):
+        raise HTTPException(404, "เสียง cue ยังไม่พร้อม")
+    background = db.get_artifact(job_id, "background")
+    if not background:
+        raise HTTPException(404, "ยังไม่มีเสียงพื้นหลังสำหรับผสมตัวอย่าง")
+    job_root = (JOBS_DIR / job_id).resolve()
+    voice_path = resolve_data_path(cue["audio_path"])
+    background_path = resolve_data_path(background["path"])
+    if not voice_path.is_file() or not voice_path.is_relative_to(job_root):
+        raise HTTPException(404, "ไม่พบเสียง cue")
+    if not background_path.is_file() or not background_path.is_relative_to(job_root):
+        raise HTTPException(404, "ไม่พบเสียงพื้นหลัง")
+
+    preview_dir = job_root / "work" / "previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    output = preview_dir / f"{cue['position']:05d}.wav"
+    start_seconds = int(cue["start_ms"]) / 1000
+    # Listen a little past the voice end so the background tail is audible too.
+    duration_seconds = max(0.5, (int(cue["end_ms"]) + 1500 - int(cue["start_ms"])) / 1000)
+    try:
+        mix_cue_preview(
+            background_path,
+            voice_path,
+            output,
+            start_seconds,
+            duration_seconds,
+            float(job.get("background_volume") or 100),
+            float(job.get("voice_volume") or 100),
+        )
+    except MediaError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return FileResponse(output, media_type="audio/wav")
 
 
 @router.delete("/{job_id}", status_code=204)

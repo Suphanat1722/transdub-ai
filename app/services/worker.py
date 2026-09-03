@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import shutil
 import threading
 import time
@@ -41,19 +40,6 @@ from .transcription import QuotaWait, transcribe
 from .translation import TranslationError, serialize_srt, translate
 
 logger = logging.getLogger(__name__)
-
-
-def apply_glossary(text: str, glossary: list[dict[str, str]]) -> str:
-    """Rewrite only explicit project terms, so Edge TTS reads them aloud correctly."""
-    result = text
-    for rule in sorted(glossary, key=lambda item: len(item["source"]), reverse=True):
-        source, spoken = rule["source"], rule["spoken"]
-        if source.isalnum():
-            spoken_escaped = spoken.replace("\\", r"\\")
-            result = re.sub(rf"(?<!\w){re.escape(source)}(?!\w)", spoken_escaped, result)
-        else:
-            result = result.replace(source, spoken)
-    return result
 
 
 class JobWorker:
@@ -367,7 +353,7 @@ class JobWorker:
         ``needs_review`` instead of silently truncating the last words.
         """
         job_id = job["id"]
-        inference_text = apply_glossary(cue["text"], job.get("glossary", []))
+        inference_text = str(cue["text"])
         voice = job.get("voice") or EDGE_TTS_DEFAULT_VOICE
         base_rate = int(job.get("tts_rate") or 0)
         revision = int(cue.get("generation_revision") or 0)
@@ -427,21 +413,15 @@ class JobWorker:
             else:
                 overrun = True  # hit the rate ceiling; keep the natural clip.
 
-            if not overrun:
-                # Fit by speeding up only as much as needed (never trim tails,
-                # because re-synthesis already picked a rate that fits).
-                final_ms, speed_factor, reaches_next = fit_before_next_start(
-                    raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
-                )
-                reached_next = reaches_next
-            else:
-                # Highest rate still overruns: keep the full clip (no truncation)
-                # and flag it.  Assembly later shifts later cues, or stops at
-                # needs_review if the final cue overruns the video.
-                final_ms, speed_factor, reaches_next = fit_before_next_start(
-                    raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
-                )
-                reached_next = reaches_next
+            # Fit by speeding up only as much as needed (never trim tails,
+            # because re-synthesis already picked a rate that fits).  If the
+            # highest rate still overruns, the full clip is kept and flagged:
+            # assembly later shifts later cues, or stops at needs_review when
+            # the final cue overruns the video.
+            final_ms, speed_factor, reaches_next = fit_before_next_start(
+                raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
+            )
+            reached_next = reaches_next
 
             warnings = list(cue.get("warnings") or json.loads(cue.get("warnings_json", "[]")))
             if overrun:
