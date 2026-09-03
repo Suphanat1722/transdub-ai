@@ -11,6 +11,7 @@ Neither call needs a YouTube API key.
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from pathlib import Path
 
 from ..core.config import youtube_proxy_settings
@@ -87,24 +88,39 @@ def _build_transcript_api():
     return YouTubeTranscriptApi()
 
 
-def _download_options(target_dir: Path) -> dict:
-    """yt-dlp options, using the same configured proxy and a captcha-avoiding client."""
+def _base_options(target_dir: Path) -> dict:
+    """yt-dlp options shared across attempts: output, proxy and quiet flags."""
     options = {
-        "format": "bv*+ba/b",
         "outtmpl": str(target_dir / "youtube.%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        # The Android player client is served without the interactive captcha
-        # that triggers YouTube's "page needs to be reloaded" error during
-        # plain web-client fetches.
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     proxy = _proxy_url()
     if proxy:
         options["proxy"] = proxy
     return options
+
+
+def _download_attempts(target_dir: Path) -> list[dict]:
+    """Candidate yt-dlp option sets, tried in order until one downloads a file.
+
+    A single client can lack a matching format (e.g. Android without audio-only
+    ``ba`` makes ``bv*+ba`` fail with "Requested format is not available"), so we
+    fall back across clients and looser format selectors.
+    """
+    base = _base_options(target_dir)
+    return [
+        # Prefer separate best video + audio (merges), Android avoids the captcha.
+        {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["android"]}}},
+        # iOS exposes a wider format set (incl. audio-only) without the captcha.
+        {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["ios"]}}},
+        # TV client serves combined high-quality mp4 (video+audio together).
+        {**base, "format": "best", "extractor_args": {"youtube": {"player_client": ["tv"]}}},
+        # Last resort: any client, any format that includes audio.
+        {**base, "format": "bestvideo+bestaudio/best"},
+    ]
 
 
 def download_video(url: str, target_dir: Path) -> Path:
@@ -115,22 +131,30 @@ def download_video(url: str, target_dir: Path) -> Path:
     except ImportError as exc:
         raise YouTubeError("ยังไม่ได้ติดตั้ง yt-dlp") from exc
 
-    try:
-        with YoutubeDL(_download_options(target_dir)) as downloader:
-            info = downloader.extract_info(url, download=True)
-        ext = "mp4" if info.get("ext") == "mp4" else (info.get("ext") or "mp4")
-    except Exception as exc:
-        raise YouTubeError(f"ดาวน์โหลดวิดีโอจาก YouTube ไม่สำเร็จ: {exc}") from exc
-
-    target = target_dir / f"youtube.{ext}"
-    if not target.is_file():
-        # yt-dlp sometimes keeps the original extension even when merging to mp4.
-        candidates = list(target_dir.glob("youtube.*"))
-        if candidates:
-            target = candidates[0]
-        else:
-            raise YouTubeError("ดาวน์โหลดวิดีโอแล้วแต่ไม่พบไฟล์ผลลัพธ์")
-    return target
+    last_error: Exception | None = None
+    for options in _download_attempts(target_dir):
+        try:
+            with YoutubeDL(options) as downloader:
+                info = downloader.extract_info(url, download=True)
+            candidates = list(target_dir.glob("youtube.*"))
+            if candidates:
+                target = candidates[0]
+                if not target.is_file():
+                    # yt-dlp sometimes keeps the original extension after merging.
+                    continue
+                ext = "mp4" if info.get("ext") == "mp4" else (info.get("ext") or "mp4")
+                intended = target_dir / f"youtube.{ext}"
+                if intended.exists() and intended != target:
+                    target = intended
+                return target
+        except Exception as exc:
+            last_error = exc
+            # A captcha/reload or format error on one client → try the next.
+            for stale in target_dir.glob("youtube.*"):
+                with suppress(OSError):
+                    stale.unlink()
+            continue
+    raise YouTubeError(f"ดาวน์โหลดวิดีโอจาก YouTube ไม่สำเร็จ: {last_error}")
 
 
 def fetch_subtitle(url: str) -> tuple[str, str]:
