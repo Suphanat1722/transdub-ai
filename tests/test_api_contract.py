@@ -23,8 +23,11 @@ def test_create_read_pause_resume_job(monkeypatch, tmp_path: Path) -> None:
     with TestClient(create_app()) as client:
         response = client.post(
             "/api/jobs",
-            data={"voice": "th-TH-PremwadeeNeural", "pause_after_translation": "true"},
-            files={"video": ("clip.mp4", b"not-probed-until-worker-runs", "video/mp4")},
+            data={
+                "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "voice": "th-TH-PremwadeeNeural",
+                "pause_after_translation": "true",
+            },
         )
         assert response.status_code == 202
         created = response.json()

@@ -13,7 +13,14 @@ from google.genai import types
 
 from ..core.config import TRANSLATION_MODELS, gemini_api_key
 from ..repositories import database as db
-from .transcription import QuotaWait
+
+
+class QuotaWait(RuntimeError):
+    """Raised when an external service (Gemini) reports rate limiting; the worker waits and retries."""
+
+    def __init__(self, message: str, retry_at: datetime):
+        super().__init__(message)
+        self.retry_at = retry_at
 
 DEFAULT_TRANSLATION_PROMPT = """คุณเป็นนักแปลซับไตเติลและผู้เรียบเรียงบทพากย์ภาษาไทยมืออาชีพ งานของคุณคือแปลไฟล์ SRT ที่ได้รับเป็นภาษาไทย เพื่อนำไปสร้างเสียงพากย์ด้วยระบบ TTS
 

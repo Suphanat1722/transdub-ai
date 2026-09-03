@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "transdub-ai"
 version = "1.2.0"
-description = "End-to-end local Thai video dubbing with Gemini, Edge TTS, Demucs and FFmpeg"
+description = "End-to-end Thai YouTube dubbing with yt-dlp, Gemini, Edge TTS, Demucs and FFmpeg"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
@@ -20,6 +20,8 @@ dependencies = [
   "python-multipart==0.0.20",
   "soundfile==0.13.1",
   "uvicorn==0.35.0",
+  "yt-dlp==2025.1.15",
+  "youtube-transcript-api==1.0.1",
 ]
 
 [project.optional-dependencies]

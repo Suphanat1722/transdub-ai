@@ -15,8 +15,8 @@
   <main>
     <section class="hero">
       <p class="eyebrow">VIDEO → TRANSCRIPT → THAI → VOICE → MP4</p>
-      <h1>เลือกวิดีโอครั้งเดียว<br><em>แล้วปล่อยให้ระบบพากย์จนจบ</em></h1>
-      <p>ถอดเสียงและแปลด้วย Gemini · เสียงพากย์ไทยจาก Edge TTS · แยกเสียงพื้นหลังและประกอบวิดีโอบนเครื่องคุณ</p>
+      <h1>วางลิงก์ YouTube<br><em>แล้วปล่อยให้ระบบพากย์จนจบ</em></h1>
+      <p>ดาวน์โหลดวิดีโอและดึงคำบรรยายจาก YouTube · แปลเป็นไทยด้วย Gemini · เสียงพากย์จาก Edge TTS · แยกเสียงพื้นหลังและประกอบวิดีโอบนเครื่องคุณ</p>
     </section>
 
     <section id="system-warning" class="warning" hidden></section>
@@ -32,11 +32,11 @@
         <div id="create-panel">
           <h2>สร้างงานพากย์</h2>
 <form id="job-form">
-            <label class="drop" id="video-drop">
-              <input id="video" name="video" type="file" accept="video/*,.mkv,.mov,.webm" required>
+            <label class="drop" id="youtube-url-box">
+              <input id="youtube-url" name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
               <span class="drop-icon">▶</span>
-              <strong>เลือกหรือลากไฟล์วิดีโอ</strong>
-              <small id="video-name">รองรับไฟล์ที่ FFmpeg อ่านได้ สูงสุด 8 GB</small>
+              <strong>วางลิงก์ YouTube</strong>
+              <small>ระบบดาวน์โหลดวิดีโอและดึงคำบรรยายจาก YouTube ให้อัตโนมัติ</small>
             </label>
             <div class="voice-toolbar">
               <input id="voice-search" type="search" placeholder="ค้นหาเสียงพากย์ เช่น Niwat, Premwadee">
@@ -67,24 +67,11 @@
                 <button type="button" id="pick-folder-btn" class="secondary">เลือกโฟลเดอร์…</button>
               </label>
             </div>
-            <div class="checks">
-              <label><input id="use-srt" type="checkbox"> ใช้ SRT แทนการถอดเสียงจากวิดีโอ</label>
+<div class="checks">
+              <label><input name="pause_after_transcription" type="checkbox" checked> พักก่อนแปล (เฉพาะซับที่ไม่ใช่ภาษาไทย)</label>
+              <label><input name="pause_after_translation" type="checkbox" checked> พักเพื่อตรวจคำแปล</label>
             </div>
-            <div id="srt-upload-box" class="drop" hidden>
-              <input id="srt-file" name="srt" type="file" accept=".srt" hidden>
-              <span class="drop-icon">⤓</span>
-              <strong>เลือกไฟล์ SRT</strong>
-              <small id="srt-file-name">ยังไม่ได้เลือกไฟล์</small>
-              <div class="srt-mode">
-                <label><input type="radio" name="srt_mode" value="translated" checked> SRT แปลแล้วแล้ว (ภาษาไทย) — ข้าม Gemini</label>
-                <label><input type="radio" name="srt_mode" value="pending"> SRT ยังไม่แปล — ให้ Gemini แปลก่อน</label>
-              </div>
-            </div>
-            <div class="checks">
-              <label><input name="pause_after_transcription" type="checkbox" checked> พักเพื่อตรวจ transcript</label>
-              <label><input name="pause_after_translation" type="checkbox" checked> พักเพื่อตรวจคําแปล</label>
-            </div>
-            <button class="primary wide" type="submit">เริ่มพากย์วิดีโอ</button>
+            <button class="primary wide" type="submit">เริ่มพากย์</button>
             <div id="upload-progress" class="upload-progress" hidden><span></span></div>
           </form>
         </div>

@@ -22,7 +22,6 @@ EDGE_TTS_DEFAULT_VOICE = "th-TH-NiwatNeural"
 # without cutting words, capped at MAX_TTS_RATE.
 RATE_STEP = 10
 MAX_TTS_RATE = 50
-TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "gemini-3.5-transcribe")
 TRANSLATION_MODELS = tuple(
     value.strip()
     for value in os.getenv(

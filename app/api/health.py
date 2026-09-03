@@ -4,7 +4,6 @@ from fastapi import APIRouter
 
 from ..core.config import (
     EDGE_TTS_DEFAULT_VOICE,
-    TRANSCRIPTION_MODEL,
     TRANSLATION_MODELS,
     ffmpeg_path,
     gemini_api_key,
@@ -24,7 +23,6 @@ def health() -> dict:
         "demucs_available": importlib.util.find_spec("demucs") is not None,
         "edge_tts_available": edge_ok,
         "default_voice": EDGE_TTS_DEFAULT_VOICE,
-        "transcription_model": TRANSCRIPTION_MODEL,
         "translation_models": TRANSLATION_MODELS,
         "engine": "transdub-edge",
     }

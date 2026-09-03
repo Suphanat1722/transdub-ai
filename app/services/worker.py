@@ -36,8 +36,9 @@ from .media import (
     mix_output,
     probe_media,
 )
-from .transcription import QuotaWait, transcribe
-from .translation import TranslationError, serialize_srt, translate
+from .srt import SrtValidationError, parse_srt
+from .translation import QuotaWait, TranslationError, serialize_srt, translate
+from .youtube import YouTubeError, download_video, fetch_subtitle
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +144,18 @@ class JobWorker:
             return
         stage = job.get("stage") or "uploaded"
         if stage == "uploaded":
+            self._download_youtube(job)
+        elif stage == "downloaded":
             self._extract(job)
         elif stage == "extracted":
             self._separate(job)
         elif stage == "separated":
             if job.get("mode") == "import":
-                # Translated SRT: transcription and Gemini translation skipped.
+                # Thai subtitle: used as the dub text directly; Gemini skipped.
                 self._skip_to_synthesize(job)
-            elif job.get("mode") == "import_pending":
-                # Not-yet-translated SRT: source cues are already populated from
-                # the file; go straight to Gemini translation (skip ASR).
-                self._import_pending_to_translate(job)
             else:
-                self._transcribe(job)
+                # Non-Thai subtitle: source cues are populated; Gemini translates.
+                self._import_pending_to_translate(job)
         elif stage == "transcribed":
             if job.get("pause_after_transcription") and not job.get("transcript_approved"):
                 db.update_job(job_id, status="reviewing_transcript", progress=45)
@@ -172,6 +172,76 @@ class JobWorker:
             self._mux(job)
         else:
             raise RuntimeError(f"ไม่รู้จัก pipeline stage: {stage}")
+
+    def _download_youtube(self, job: dict) -> None:
+        job_id = job["id"]
+        url = (job.get("source_path") or "").strip()
+        if not url:
+            raise RuntimeError("งาน YouTube ไม่มี URL ต้นฉบับ")
+        db.update_job(job_id, status="downloading", progress=2, error=None, wait_reason=None)
+        job_dir = JOBS_DIR / job_id
+        source = job_dir / "source"
+        source.mkdir(parents=True, exist_ok=True)
+
+        # 1. Download the actual video file (needed for Demucs and muxing).
+        video_path = download_video(url, source)
+        info = probe_media(video_path)
+        if not info.has_video:
+            raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี video stream")
+        if not info.has_audio:
+            raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี audio stream")
+
+        # 2. Pull the available subtitle from YouTube.
+        srt_text, language = fetch_subtitle(url)
+        try:
+            parsed = parse_srt(srt_text.encode("utf-8"))
+        except SrtValidationError as exc:
+            raise YouTubeError(f"อ่านคำบรรยายจาก YouTube ไม่สำเร็จ: {exc}") from exc
+        cues = [
+            {
+                "source_index": cue.source_index,
+                "start_ms": cue.start_ms,
+                "end_ms": cue.end_ms,
+                "text": cue.text,
+                "warnings": list(cue.warnings),
+            }
+            for cue in parsed.cues
+        ]
+        if not cues:
+            raise YouTubeError("คำบรรยายที่ดึงได้มี cue ว่าง")
+
+        thai = language and language.split("-")[0].lower() == "th"
+        db.replace_source_cues(job_id, cues)
+        if thai:
+            # Thai subtitle doubles as both the transcript and the dub text.
+            db.replace_translation_cues(job_id, cues)
+            db.update_job(
+                job_id,
+                stage="downloaded",
+                progress=5,
+                mode="import",
+                source_path=data_relative(video_path),
+                filename=video_path.name,
+                video_duration_ms=round(info.duration * 1000),
+                video_codec=info.video_codec,
+                wait_reason=None,
+                error=None,
+            )
+        else:
+            # Non-Thai subtitle becomes the source; Gemini translates to Thai.
+            db.update_job(
+                job_id,
+                stage="downloaded",
+                progress=5,
+                mode="import_pending",
+                source_path=data_relative(video_path),
+                filename=video_path.name,
+                video_duration_ms=round(info.duration * 1000),
+                video_codec=info.video_codec,
+                wait_reason=None,
+                error=None,
+                source_language=language or "auto",
+            )
 
     def _extract(self, job: dict) -> None:
         job_id = job["id"]
@@ -229,12 +299,7 @@ class JobWorker:
         )
 
     def _import_pending_to_translate(self, job: dict) -> None:
-        """Move import-pending jobs (source from SRT) to the Gemini translate step.
-
-        The translation-layer prompts are set at creation, and untranslated SRTs
-        must pause for the user to review the source and write the Gemini
-        system prompt before translating -- exactly like the normal ASR flow.
-        """
+        """Move non-Thai-subtitle jobs to the Gemini translate step."""
         job_id = job["id"]
         source_srt = JOBS_DIR / job_id / "artifacts" / "source.srt"
         source_srt.parent.mkdir(parents=True, exist_ok=True)
@@ -250,31 +315,6 @@ class JobWorker:
             transcript_approved=0 if pause else 1,
             wait_reason=None,
             error=None,
-        )
-
-    def _transcribe(self, job: dict) -> None:
-        job_id = job["id"]
-        db.update_job(job_id, status="transcribing", progress=28, error=None, wait_reason=None)
-        job_dir = JOBS_DIR / job_id
-        cues = transcribe(
-            job_id,
-            resolve_data_path(job["original_audio_path"]),
-            job_dir / "work",
-            job.get("source_language") or "auto",
-        )
-        db.replace_source_cues(job_id, cues)
-        source_srt = job_dir / "artifacts" / "source.srt"
-        source_srt.parent.mkdir(parents=True, exist_ok=True)
-        source_srt.write_text(serialize_srt(cues, bom=True), encoding="utf-8")
-        db.put_artifact(job_id, "source_srt", source_srt, "application/x-subrip")
-        pause = bool(job.get("pause_after_transcription"))
-        db.update_job(
-            job_id,
-            status="reviewing_transcript" if pause else "queued",
-            stage="transcribed",
-            progress=45,
-            source_srt_path=data_relative(source_srt),
-            transcript_approved=0 if pause else 1,
         )
 
     def _translate(self, job: dict) -> None:

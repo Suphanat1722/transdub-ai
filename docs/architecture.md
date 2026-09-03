@@ -7,18 +7,19 @@ TransDub AI เป็น local-first single-user application ตัว FastAPI, 
 - `app/api` — HTTP routing, request validation และ response files
 - `app/core` — paths, constants และ runtime configuration
 - `app/repositories` — SQLite access และ data migrations
-- `app/services` — SRT parsing, audio processing, queue worker และ Edge TTS synthesis
+- `app/services` — YouTube download/subtitles, SRT parsing, audio processing, queue worker และ Edge TTS synthesis
 - `app/static` — dependency-free browser interface
 - `migrations` — Alembic schema history
 
 ## Runtime flow
 
 1. FastAPI เริ่มระบบและอัปเกรด SQLite schema
-2. queue worker ใช้ glossary ที่ผู้ใช้กําหนด แล้วสังเคราะห์ทีละ cue ด้วย Edge TTS (`edge_tts.Communicate`) ตามเสียงและอัตราการพูดที่บันทึกไว้ในแต่ละงาน เพื่อให้เสียงพอดีช่องเวลาโดยไม่ตัดคํา ระบบจะลองเพิ่มอัตราเร็ว (rate) ขึ้นทีละขั้น (+10% จนถึงสูงสุด +50%) สร้างใหม่จนกว่าจะพอดี; ถ้าเร่งสุดแล้วยังยาวเกินจะเก็บเต็มเสียงและแจ้งเตือนให้ตรวจ
-3. Edge TTS คืนผลเป็น MP3 จากบริการ `speech.platform.bing.com`; ระบบแปลงเป็น WAV 24 kHz mono ด้วย FFmpeg แล้วเก็บเข้าตําแหน่ง cue พร้อม cache ตาม (text + voice + rate)
-4. เมื่อครบทุก cue ระบบวางเสียงตาม start time โดยไม่ยืดหรือบังคับจบที่ end time; ถ้าเสียงยังชน cue ถัดไปจะเลื่อน cue ถัดไปตามเพดานที่ตั้งไว้ หากเสียงยาวเกินวิดีโอระบบจะหยุดที่ `needs_review` ให้แก้/ย่อข้อความแทนการตัดคําทิ้ง
-5. FFmpeg แบ่งประกอบเป็น stem ละไม่เกิน 64 cue แล้ว mix stem พร้อม limiter ครั้งเดียว ทุกคําสั่งสั้นกว่า 20,000 ตัวอักษร
-6. WAV/MP3/JSON/CSV ถูกเขียนใน temporary output revision และเปิดใช้งานแบบ atomic เมื่อครบทั้งหมด โดย master ยาวอย่างน้อยถึง subtitle end สุดท้าย
+2. งานถูกสร้างจากลิงก์ YouTube (`mode="youtube"`); worker ขั้น `downloaded` ใช้ yt-dlp ดาวน์โหลดวิดีโอ (`app/services/youtube.py`) แล้วดึง subtitle จาก YouTube ด้วย youtube-transcript-api -- ซับภาษาไทยกลายเป็น source+translation (`mode="import"`, ข้าม Gemini ทั้งหมด) ส่วนซับภาษาอื่นกลายเป็น source แล้วเลื่อนเข้า Gemini แปล (`mode="import_pending"`)
+3. worker ใช้ข้อความ cue แล้วสังเคราะห์ทีละ cue ด้วย Edge TTS (`edge_tts.Communicate`) ตามเสียงและอัตราการพูดที่บันทึกไว้ในแต่ละงาน เพื่อให้เสียงพอดีช่องเวลาโดยไม่ตัดคํา ระบบจะลองเพิ่มอัตราเร็ว (rate) ขึ้นทีละขั้น (+10% จนถึงสูงสุด +50%) สร้างใหม่จนกว่าจะพอดี; ถ้าเร่งสุดแล้วยังยาวเกินจะเก็บเต็มเสียงและแจ้งเตือนให้ตรวจ
+4. Edge TTS คืนผลเป็น MP3 จากบริการ `speech.platform.bing.com`; ระบบแปลงเป็น WAV 24 kHz mono ด้วย FFmpeg แล้วเก็บเข้าตําแหน่ง cue พร้อม cache ตาม (text + voice + rate)
+5. เมื่อครบทุก cue ระบบวางเสียงตาม start time โดยไม่ยืดหรือบังคับจบที่ end time; ถ้าเสียงยังชน cue ถัดไปจะเลื่อน cue ถัดไปตามเพดานที่ตั้งไว้ หากเสียงยาวเกินวิดีโอระบบจะหยุดที่ `needs_review` ให้แก้/ย่อข้อความแทนการตัดคําทิ้ง
+6. FFmpeg แบ่งประกอบเป็น stem ละไม่เกิน 64 cue แล้ว mix stem พร้อม limiter ครั้งเดียว ทุกคําสั่งสั้นกว่า 20,000 ตัวอักษร
+7. WAV/MP3/JSON/CSV ถูกเขียนใน temporary output revision และเปิดใช้งานแบบ atomic เมื่อครบทั้งหมด โดย master ยาวอย่างน้อยถึง subtitle end สุดท้าย
 
 ## Job settings after creation
 
@@ -39,4 +40,4 @@ TransDub AI เป็น local-first single-user application ตัว FastAPI, 
 - **Edge TTS** เป็นบริการคลาวด์ของ Microsoft ไม่มี weight ใน repository และไม่มี voice cloning ใช้เสียงพากย์สำเร็จรูปตาม `voice` ที่เลือกในงานเท่านั้น (ค่าเริ่มต้น `th-TH-NiwatNeural`) รายการเสียงถูก cache ไว้ใน process 10 นาที เพื่อไม่ให้ `/api/health` และ `/api/voices` เรียก network ทุกครั้ง
 - Edge TTS ต้องเข้าถึงอินเทอร์เน็ตได้ ณ เวลาที่สร้างเสียง หากเข้าถึงไม่ได้ worker หน่วงและลองใหม่ (`waiting_quota`)
 - **Demucs** ยังทําบนเครื่องเพื่อแยก background stem ใช้ CUDA ได้ถ้ามี ไม่งั้น CPU
-- ข้อความ/เสียงสําหรับถอดความและแปลถูกส่งไป Gemini; เสียงพูดพากย์เองถูกสร้างผ่าน Edge TTS
+- ข้อความคําบรรยายจาก YouTube ที่ไม่ใช่ไทยถูกส่งไป Gemini แปลเป็นไทย; เสียงพากย์เองสร้างผ่าน Edge TTS (ดาวน์โหลดวิดีโอ/ดึงซับทําผ่าน yt-dlp + youtube-transcript-api ยังต้องอินเทอร์เน็ต)

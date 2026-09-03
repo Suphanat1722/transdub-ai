@@ -8,26 +8,25 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
-from ..core.config import JOBS_DIR, MAX_VIDEO_BYTES, resolve_data_path
+from ..core.config import JOBS_DIR, resolve_data_path
 from ..repositories import database as db
 from ..services.media import MediaError, mix_cue_preview
-from ..services.srt import SrtValidationError, parse_srt
 from ..services.translation import serialize_srt
 from ..services.worker import worker
+from ..services.youtube import extract_video_id
 from .dependencies import require_job
 from .schemas import CueEditRequest, JobActionRequest, JobSettingsRequest, TranslationPromptRequest
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
-UPLOAD_CHUNK = 1024 * 1024
 ACTIVE = {
     "running",
+    "downloading",
     "extracting",
     "separating",
-    "transcribing",
     "translating",
     "synthesizing",
     "muxing",
@@ -75,29 +74,14 @@ def pick_export_folder() -> dict:
     return {"path": folder}
 
 
-async def _save_upload(upload: UploadFile, target: Path) -> None:
-    written = 0
-    try:
-        with target.open("wb") as output:
-            while chunk := await upload.read(UPLOAD_CHUNK):
-                written += len(chunk)
-                if written > MAX_VIDEO_BYTES:
-                    raise HTTPException(413, "ไฟล์วิดีโอใหญ่เกินขนาดที่กำหนด")
-                output.write(chunk)
-    finally:
-        await upload.close()
-    if written == 0:
-        raise HTTPException(422, "ไฟล์วิดีโอว่างเปล่า")
-
-
 @router.get("")
 def jobs() -> list[dict]:
     return [public_job(job) for job in db.list_jobs() if job.get("engine") == "transdub"]
 
 
 @router.post("", status_code=202)
-async def create_job(
-    video: UploadFile = File(...),
+def create_job(
+    youtube_url: str = Form(...),
     voice: str = Form(""),
     source_language: str = Form("auto"),
     pause_after_transcription: bool = Form(False),
@@ -107,8 +91,6 @@ async def create_job(
     tts_rate: int = Form(0),
     output_dir: str = Form(""),
     translation_prompt: str = Form(""),
-    srt: UploadFile | None = File(None),
-    srt_mode: str = Form("translated"),
 ) -> dict:
     if not 0 <= background_volume <= 150 or not 0 <= voice_volume <= 150:
         raise HTTPException(422, "ระดับเสียงต้องอยู่ระหว่าง 0–150 เปอร์เซ็นต์")
@@ -117,68 +99,30 @@ async def create_job(
     export_dir = output_dir.strip() or None
     if export_dir and not os.path.isdir(export_dir):
         raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {export_dir}")
+    url = youtube_url.strip()
+    if not extract_video_id(url):
+        raise HTTPException(422, "กรุณากรอกลิงก์ YouTube ที่ถูกต้อง")
 
-    # Imported-SRT path: decide whether the SRT is already translated (skip ASR
-# and Gemini) or still needs Gemini translation before synthesis.
-    mode = "normal"
-    imported_cues: list[dict] = []
-    if srt is not None:
-        raw = await srt.read()
-        if not raw:
-            raise HTTPException(422, "ไฟล์ SRT ว่างเปล่า")
-        try:
-            parsed = parse_srt(raw)
-        except SrtValidationError as exc:
-            raise HTTPException(422, f"ไฟล์ SRT ไม่ถูกต้อง: {exc}") from exc
-        imported_cues = [
-            {
-                "source_index": cue.source_index,
-                "start_ms": cue.start_ms,
-                "end_ms": cue.end_ms,
-                "text": cue.text,
-                "warnings": list(cue.warnings),
-            }
-            for cue in parsed.cues
-        ]
-        if not imported_cues:
-            raise HTTPException(422, "ไฟล์ SRT ไม่มีข้อความ")
-        mode = "import" if srt_mode == "translated" else "import_pending"
-
-    safe_name = Path(video.filename or "video.mp4").name
-    suffix = Path(safe_name).suffix.lower()[:12] or ".video"
     job_id = str(uuid.uuid4())
     job_dir = JOBS_DIR / job_id
     source_dir = job_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=False)
-    target = source_dir / f"video{suffix}"
     try:
-        await _save_upload(video, target)
         created = db.create_video_job(
             job_id=job_id,
-            filename=safe_name,
-            source_path=target,
+            filename=f"youtube-{job_id[:8]}.mp4",
+            source_path=url,
             source_language=source_language.strip()[:80] or "auto",
-            pause_after_transcription=False if mode == "import" else (True if mode == "import_pending" else pause_after_transcription),
-            # import_pending must always pause for the user to review the
-            # Gemini translation before synthesis, regardless of what the UI
-            # sent (older cached JS used to uncheck the review boxes).
-            pause_after_translation=False if mode == "import" else (True if mode == "import_pending" else pause_after_translation),
+            pause_after_transcription=pause_after_transcription,
+            pause_after_translation=pause_after_translation,
             background_volume=background_volume,
             voice_volume=voice_volume,
             voice=voice.strip() or None,
             tts_rate=tts_rate,
             output_dir=export_dir,
-            mode=mode,
+            mode="youtube",
             translation_prompt=translation_prompt.strip() or None,
         )
-        if mode == "import":
-            # Translated SRT: source == translation layer, use directly.
-            db.replace_source_cues(job_id, imported_cues)
-            db.replace_translation_cues(job_id, imported_cues)
-        elif mode == "import_pending":
-            # Not-yet-translated SRT: use it as the source (transcript) so the
-            # Gemini translation step runs before synthesis.
-            db.replace_source_cues(job_id, imported_cues)
     except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise

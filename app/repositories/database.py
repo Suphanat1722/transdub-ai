@@ -368,6 +368,7 @@ def update_job(job_id: str, **fields) -> None:
         "translation_prompt",
         "mode",
         "source_path",
+        "filename",
         "original_audio_path",
         "background_path",
         "source_srt_path",
@@ -575,7 +576,7 @@ def create_video_job(
     *,
     job_id: str,
     filename: str,
-    source_path: Path,
+    source_path: str | Path | None = None,
     source_language: str,
     pause_after_transcription: bool,
     pause_after_translation: bool,
@@ -584,7 +585,7 @@ def create_video_job(
     voice: str | None = None,
     tts_rate: int = 0,
     output_dir: str | None = None,
-    mode: str = "normal",
+    mode: str = "youtube",
     translation_prompt: str | None = None,
 ) -> dict:
     now = utc_now()
@@ -592,7 +593,16 @@ def create_video_job(
     settings = get_settings()
     effective_voice = voice or settings["voice"]
     effective_rate = int(tts_rate if tts_rate is not None else settings.get("tts_rate") or 0)
-    effective_mode = mode if mode in {"normal", "import", "import_pending"} else "normal"
+    effective_mode = mode if mode in {"youtube", "import", "import_pending"} else "youtube"
+    # For a YouTube job, source_path holds the URL string until the worker
+    # downloads the actual file (then it is replaced with the file path).  A
+    # provided file path is relativized as before.
+    if source_path is None:
+        source_path_value = None
+    elif isinstance(source_path, str):
+        source_path_value = source_path
+    else:
+        source_path_value = data_relative(source_path)
     with connect() as conn:
         conn.execute(
             """INSERT INTO jobs(
@@ -616,7 +626,7 @@ def create_video_job(
                 settings["max_start_delay_ms"],
                 seed,
                 PIPELINE_REVISION,
-                data_relative(source_path),
+                source_path_value,
                 source_language or "auto",
                 "th",
                 int(pause_after_transcription),

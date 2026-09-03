@@ -13,6 +13,8 @@ from app.services.worker import worker
 
 from .test_database_pipeline import configure_temp_data
 
+URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
 
 def _setup(monkeypatch, tmp_path: Path) -> None:
     configure_temp_data(monkeypatch, tmp_path)
@@ -24,80 +26,54 @@ def _setup(monkeypatch, tmp_path: Path) -> None:
     db.init_db()
 
 
-def test_create_job_with_srt_sets_import_mode_and_cues(monkeypatch, tmp_path: Path) -> None:
+def _mock_youtube(monkeypatch, tmp_path: Path, srt_text: str, language: str) -> None:
+    from types import SimpleNamespace
+
+    def fake_download(url: str, target_dir: Path) -> Path:
+        video = target_dir / "youtube.mp4"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"video")
+        return video
+
+    monkeypatch.setattr(worker_module, "download_video", fake_download)
+    monkeypatch.setattr(
+        worker_module,
+        "probe_media",
+        lambda path: SimpleNamespace(
+            has_video=True, has_audio=True, duration=10.0, video_codec="h264"
+        ),
+    )
+    monkeypatch.setattr(worker_module, "fetch_subtitle", lambda url: (srt_text, language))
+
+
+def test_create_job_stores_translation_prompt(monkeypatch, tmp_path: Path) -> None:
     _setup(monkeypatch, tmp_path)
-    srt = "1\n00:00:00,000 --> 00:00:01,000\n\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35\n".encode()
     with TestClient(create_app()) as client:
         resp = client.post(
             "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural", "pause_after_translation": "true"},
-            files={
-                "video": ("clip.mp4", b"not-probed", "video/mp4"),
-                "srt": ("th.srt", srt, "text/plain"),
-            },
+            data={"youtube_url": URL, "translation_prompt": "ใช้ภาษาไทยสุภาพ"},
         )
         assert resp.status_code == 202
-        data = resp.json()
-        assert data["mode"] == "import"
-        assert data["status"] == "queued"
-        job_id = data["id"]
-        job = db.get_job(job_id)
-        assert job is not None
-        # Cues preloaded as the translation layer from the imported SRT.
-        assert job["cues"][0]["text"] == "สวัสดี"
+        assert resp.json()["translation_prompt"] == "ใช้ภาษาไทยสุภาพ"
 
 
-def test_create_job_with_pending_srt_sets_import_pending(monkeypatch, tmp_path: Path) -> None:
+def test_non_thai_youtube_worker_pauses_at_transcript_review(monkeypatch, tmp_path: Path) -> None:
+    """A non-Thai subtitle lands on transcript review so the user can set the
+    Gemini prompt before translating."""
     _setup(monkeypatch, tmp_path)
-    srt = b"1\n00:00:00,000 --> 00:00:01,000\nHello there\n"
+    srt = "1\n00:00:00,000 --> 00:00:01,000\nHello there\n"
+    _mock_youtube(monkeypatch, tmp_path, srt, "en")
     with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural", "srt_mode": "pending"},
-            files={
-                "video": ("clip.mp4", b"not-probed", "video/mp4"),
-                "srt": ("src.srt", srt, "text/plain"),
-            },
-        )
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["mode"] == "import_pending"
-        assert data["status"] == "queued"
-        # Untranslated-SRT mode must always stop to set the Gemini prompt and
-        # review the source, and then to review the translation, even when the
-        # UI sends no pause flags (e.g. cached older JS).  This guarantees the
-        # job pauses for prompt entry before translating.
-        assert data["pause_after_transcription"] is True
-        assert data["pause_after_translation"] is True
-        job_id = data["id"]
-        job = db.get_job(job_id)
-        assert job is not None
-        # Source cues come from the imported (untranslated) SRT; translation empty.
-        assert job["source_cues"][0]["text"] == "Hello there"
-        assert job["cues"] == []
-
-
-def test_pending_srt_worker_pauses_at_prompt_review(monkeypatch, tmp_path: Path) -> None:
-    # For an untranslated SRT, the worker must stop at "reviewing_transcript"
-    # (so the user can set the Gemini system prompt) before translating,
-    # rather than jumping straight into Gemini.  The backend forces both
-    # review pauses on for import_pending jobs.
-    _setup(monkeypatch, tmp_path)
-    srt = b"1\n00:00:00,000 --> 00:00:01,000\nHello there\n"
-    with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural", "srt_mode": "pending"},
-            files={
-                "video": ("clip.mp4", b"not-probed", "video/mp4"),
-                "srt": ("src.srt", srt, "text/plain"),
-            },
-        )
+        resp = client.post("/api/jobs", data={"youtube_url": URL, "pause_after_transcription": "true"})
         assert resp.status_code == 202
         job_id = resp.json()["id"]
 
-    # Drive the worker just past ASR for import_pending: it should land on the
-    # transcript-review step, not on the translation synthesis.
+    # Drive the worker through download and separation, then stop at review.
+    worker._process_one(job_id)
+    job = db.get_job(job_id)
+    assert job is not None
+    assert job["stage"] == "downloaded"
+    assert job["mode"] == "import_pending"
     db.update_job(job_id, stage="separated", status="queued")
     worker._process_one(job_id)
     job = db.get_job(job_id)
@@ -106,48 +82,6 @@ def test_pending_srt_worker_pauses_at_prompt_review(monkeypatch, tmp_path: Path)
     assert job["status"] == "reviewing_transcript"
     assert job["transcript_approved"] == 0
     assert job["source_srt_path"] is not None
-
-
-def test_create_job_without_srt_uses_normal_mode(monkeypatch, tmp_path: Path) -> None:
-    _setup(monkeypatch, tmp_path)
-    with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural", "pause_after_translation": "true"},
-            files={"video": ("clip.mp4", b"not-probed", "video/mp4")},
-        )
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["mode"] == "normal"
-        job_id = data["id"]
-        job = db.get_job(job_id)
-        assert job is not None and job["cues"] == []
-
-
-def test_create_job_with_invalid_srt_rejected(monkeypatch, tmp_path: Path) -> None:
-    _setup(monkeypatch, tmp_path)
-    with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural"},
-            files={
-                "video": ("clip.mp4", b"not-probed", "video/mp4"),
-                "srt": ("bad.srt", b"not a valid srt", "text/plain"),
-            },
-        )
-        assert resp.status_code == 422
-
-
-def test_create_job_stores_translation_prompt(monkeypatch, tmp_path: Path) -> None:
-    _setup(monkeypatch, tmp_path)
-    with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/jobs",
-            data={"voice": "th-TH-NiwatNeural", "translation_prompt": "ใช้ภาษาไทยสุภาพ"},
-            files={"video": ("clip.mp4", b"not-probed", "video/mp4")},
-        )
-        assert resp.status_code == 202
-        assert resp.json()["translation_prompt"] == "ใช้ภาษาไทยสุภาพ"
 
 
 def test_retranslate_resets_translation_and_queues(monkeypatch, tmp_path: Path) -> None:
