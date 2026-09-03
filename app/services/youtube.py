@@ -31,6 +31,26 @@ class YouTubeError(RuntimeError):
     """An error downloading a video or fetching subtitles, safe to show in the UI."""
 
 
+def _is_blocked_error(message: str) -> bool:
+    """Return True when a yt-dlp error means YouTube blocked/rate-limited the request.
+
+    These are transient (blocked IP, temporary throttling, or the "Sign in to
+    confirm you're not a bot" captcha), so the caller can retry or tell the user
+    to wait / use a residential proxy, rather than treating it as a permanent
+    subtitle defect.
+    """
+    return any(
+        keyword in message
+        for keyword in (
+            "IpBlocked",
+            "TooManyRequests",
+            "reload",
+            "Sign in to confirm",
+            "confirm you",
+        )
+    )
+
+
 def extract_video_id(url: str) -> str | None:
     """Return the 11-character YouTube video id from a URL, or None if not a YouTube URL."""
     patterns = [
@@ -170,26 +190,54 @@ def download_video(
     raise YouTubeError(f"ดาวน์โหลดวิดีโอจาก YouTube ไม่สำเร็จ: {last_error}")
 
 
+def _subtitle_attempt_options(outdir: Path, language: str) -> list[dict]:
+    """Candidate yt-dlp option sets for fetching one subtitle language, tried in
+    order.  Earlier player clients (android/ios/tv) dodge the "Sign in to confirm
+    you're not a bot" captcha that some IPs get on the default client; the last
+    entry is the unpinned default as a fallback.
+    """
+    base = _subtitle_options(outdir)
+    base["subtitleslangs"] = [language]
+    return [
+        {**base, "extractor_args": {"youtube": {"player_client": ["android"]}}},
+        {**base, "extractor_args": {"youtube": {"player_client": ["ios"]}}},
+        {**base, "extractor_args": {"youtube": {"player_client": ["tv"]}}},
+        base,
+    ]
+
+
 def _attempt_subtitle(outdir: Path, url: str, language: str) -> str | None:
     """Try to fetch ``language`` subtitles with yt-dlp; return SRT text or None.
 
     Each language is fetched on its own so a rate-limit on a later language does
     not discard an already-fetched one (seen as HTTP 429 when requesting
-    ``['th', 'en']`` together).
+    ``['th', 'en']`` together).  Within a language, the player clients are tried
+    in order so a blocked client falls through to another one.  If every client
+    fails, the last error is raised so the caller can classify it (block / 429
+    vs. other), instead of a generic None.
     """
     from yt_dlp import YoutubeDL
 
-    options = {**_subtitle_options(outdir), "subtitleslangs": [language]}
-    for stale in outdir.glob("sub.*"):
-        with suppress(OSError):
-            stale.unlink()
-    with YoutubeDL(options) as downloader:
-        downloader.download([url])
-    candidates = sorted(outdir.glob(f"sub.{language}.srt"))
-    if not candidates:
-        return None
-    text = candidates[0].read_text(encoding="utf-8", errors="replace").strip()
-    return text or None
+    last_error: Exception | None = None
+    for options in _subtitle_attempt_options(outdir, language):
+        for stale in outdir.glob("sub.*"):
+            with suppress(OSError):
+                stale.unlink()
+        try:
+            with YoutubeDL(options) as downloader:
+                downloader.download([url])
+        except Exception as exc:
+            last_error = exc
+            continue
+        candidates = sorted(outdir.glob(f"sub.{language}.srt"))
+        if not candidates:
+            continue
+        text = candidates[0].read_text(encoding="utf-8", errors="replace").strip()
+        if text:
+            return text
+    if last_error:
+        raise last_error
+    return None
 
 
 def _detect_subtitle_languages(info: dict, source_language: str = "auto") -> tuple[str, ...]:
@@ -254,11 +302,13 @@ def _available_languages(url: str) -> dict:
     options.pop("writesubtitles", None)
     options.pop("writeautomaticsub", None)
     options["skip_download"] = True
-    try:
-        with YoutubeDL(options) as downloader:
-            return downloader.extract_info(url, download=False) or {}
-    except Exception:
-        return {}
+    for client in ("android", "ios"):
+        try:
+            with YoutubeDL({**options, "extractor_args": {"youtube": {"player_client": [client]}}}) as downloader:
+                return downloader.extract_info(url, download=False) or {}
+        except Exception:
+            continue
+    return {}
 
 
 def fetch_subtitle(url: str, source_language: str = "auto") -> tuple[str, str]:
@@ -291,27 +341,38 @@ def fetch_subtitle(url: str, source_language: str = "auto") -> tuple[str, str]:
             try:
                 text = _attempt_subtitle(outdir, url, language)
             except Exception as exc:
-                message = str(exc)
-                if "IpBlocked" in message or "TooManyRequests" in message or "reload" in message:
+                if _is_blocked_error(str(exc)):
                     raise YouTubeError("YouTube บล็อก IP/จํากัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
                 continue
             if text:
                 return text, language
 
-        # Fallback: discover which tracks exist, then fetch the first available.
-        from yt_dlp import YoutubeDL
+# Fallback: discover which tracks exist, then fetch the first available.
+        try:
+            from yt_dlp import YoutubeDL
 
-        options = {**_subtitle_options(outdir), "writesubtitles": False, "writeautomaticsub": False}
-        with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(url, download=False)
-        auto = info.get("automatic_captions") or {}
-        manual = info.get("subtitles") or {}
+            options = {**_subtitle_options(outdir), "writesubtitles": False, "writeautomaticsub": False}
+            with YoutubeDL(options) as downloader:
+                info = downloader.extract_info(url, download=False)
+        except Exception as exc:
+            if _is_blocked_error(str(exc)):
+                raise YouTubeError("YouTube บล็อก IP/จํากัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
+            auto: dict = {}
+            manual: dict = {}
+        else:
+            auto = info.get("automatic_captions") or {}
+            manual = info.get("subtitles") or {}
         available = list(auto) or list(manual)
         if not available:
-            raise YouTubeError("วิดีโอนี้ไม่มีคำบรรยายที่นำเข้าพากย์ได้")
-        text = _attempt_subtitle(outdir, url, available[0])
+            raise YouTubeError("วิดีโอนี้ไม่มีคําบรรยายที่นําเข้าพากย์ได้")
+        try:
+            text = _attempt_subtitle(outdir, url, available[0])
+        except Exception as exc:
+            if _is_blocked_error(str(exc)):
+                raise YouTubeError("YouTube บล็อก IP/จํากัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
+            raise
         if not text:
-            raise YouTubeError("คำบรรยายที่ดึงได้ว่างเปล่า")
+            raise YouTubeError("คําบรรยายที่ดึงได้ว่างเปล่า")
         return text, available[0]
     finally:
         for stale in outdir.glob("sub.*"):

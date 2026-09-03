@@ -140,6 +140,42 @@ def test_download_attempts_use_proxy_and_fallback_clients(monkeypatch, tmp_path:
     assert attempts[0]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
 
 
+def test_subtitle_attempt_options_fall_through_player_clients(tmp_path: Path) -> None:
+    """Fetching one subtitle language tries android/ios/tv then the default, so a
+    blocked client (the "Sign in to confirm you're not a bot" captcha) falls
+    through to another client instead of failing the whole subtitle fetch."""
+    attempts = youtube._subtitle_attempt_options(tmp_path, "en")
+    assert len(attempts) == 4
+    assert all(a["subtitleslangs"] == ["en"] for a in attempts)
+    assert attempts[0]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+    assert attempts[1]["extractor_args"] == {"youtube": {"player_client": ["ios"]}}
+    assert attempts[2]["extractor_args"] == {"youtube": {"player_client": ["tv"]}}
+    # The final entry keeps the unpinned default client.
+    assert "extractor_args" not in attempts[3]
+
+
+def test_attempt_subtitle_retries_next_client_on_failure(monkeypatch, tmp_path: Path) -> None:
+    """If the first subtitle client fails (e.g. bot-check), the next client is
+    tried; a successful later client returns the SRT text."""
+    calls: list[list[str]] = []
+
+    def fake_download(self, url: list[str]) -> None:
+        calls.append(url)
+        options = self.params
+        language = options["subtitleslangs"][0]
+        client = options.get("extractor_args", {}).get("youtube", {}).get("player_client", ["default"])[0]
+        if client == "android":
+            raise RuntimeError("Sign in to confirm you're not a bot")
+        (tmp_path / f"sub.{language}.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nHello", encoding="utf-8")
+
+    import yt_dlp
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "download", fake_download)
+    text = youtube._attempt_subtitle(tmp_path, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "en")
+    assert text == "1\n00:00:00,000 --> 00:00:01,000\nHello"
+    assert len(calls) >= 2
+
+
 def test_create_job_requires_valid_youtube_url(monkeypatch, tmp_path: Path) -> None:
     _setup(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:
