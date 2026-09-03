@@ -41,3 +41,22 @@ TransDub AI เป็น local-first single-user application ตัว FastAPI, 
 - Edge TTS ต้องเข้าถึงอินเทอร์เน็ตได้ ณ เวลาที่สร้างเสียง หากเข้าถึงไม่ได้ worker หน่วงและลองใหม่ (`waiting_quota`)
 - **Demucs** ยังทําบนเครื่องเพื่อแยก background stem ใช้ CUDA ได้ถ้ามี ไม่งั้น CPU
 - ข้อความคําบรรยายจาก YouTube ที่ไม่ใช่ไทยถูกส่งไป Gemini แปลเป็นไทย; เสียงพากย์เองสร้างผ่าน Edge TTS (ดาวน์โหลดวิดีโอ/ดึงซับทําผ่าน yt-dlp + youtube-transcript-api ยังต้องอินเทอร์เน็ต)
+
+## Separation modes
+
+`jobs.separation_mode` (`demucs` default, `fast` opt-in): `fast` ข้าม Demucs แล้วใช้เสียงต้นฉบับเป็น
+background stem ตรง ๆ (เร็วหลายเท่า ไม่ต้องมี torch/CUDA เหมาะกับเครื่องช้าหรือวิดีโอพูดชัด)
+ตั้งตอนสร้างงาน (`separation_mode=fast`) ดูได้จาก `GET /api/jobs/{id}/logs`
+
+## Logs
+
+`GET /api/jobs/{id}/logs` รวม `error/warnings` + `stage_attempts` 100 รายการล่าสุด +
+`api_usage` หน้าเว็บมีปุ่มแสดง/ซ่อนที่การ์ด “บันทึกงาน” ใช้ตรวจ quota/model/เวลาก่อน retry
+
+## Phase-3 additions
+
+- สร้างงานเป็น wizard 3 ขั้น (วิดีโอ → เสียง → เริ่ม) validate URL ฝั่ง client ก่อนส่ง
+- แก้ source cue แบบ text-only ลบ checkpoint เฉพาะ chunk ที่ทับ (`affected_chunk_ids_for_source_index`)
+  chunk อื่น reuse checkpoint ไม่ยิง Gemini ซ้ำ (แก้เวลายังล้างทั้งงานเหมือนเดิม)
+- `GET /api/jobs/{id}/queue` บอกคิวที่/งานรอทั้งหมด (worker ยังรันทีละ 1 job เท่าเดิม)
+- `init_db()` เลิก upgrade Alembic ซ้ำบน fresh DB; `tests/test_e2e_smoke.py` คุม ready/validate/queue/logs/wizard

@@ -136,8 +136,18 @@ def test_download_attempts_use_proxy_and_fallback_clients(monkeypatch, tmp_path:
     assert len(attempts) >= 2
     for options in attempts:
         assert options.get("proxy") == "http://wsuser:wspass@res.webshare.io:80/"
+        # Stream through a real Chrome TLS fingerprint to dodge the bot-check.
+        # yt-dlp requires an ImpersonateTarget object, not a bare string.
+        assert getattr(options.get("impersonate"), "client", None) == "chrome"
     # The first attempt pins the Android player client (captcha-avoiding).
     assert attempts[0]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+
+
+def test_subtitle_attempt_options_impersonate(tmp_path: Path) -> None:
+    """Subtitle fetches also impersonate Chrome so a blocked IP is not singled
+    out when it reads the captions."""
+    attempts = youtube._subtitle_attempt_options(tmp_path, "en")
+    assert all(getattr(a.get("impersonate"), "client", None) == "chrome" for a in attempts)
 
 
 def test_subtitle_attempt_options_fall_through_player_clients(tmp_path: Path) -> None:

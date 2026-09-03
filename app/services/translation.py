@@ -524,6 +524,22 @@ def _checkpoint_for(result_dir: Path, chunk: Chunk) -> Path | None:
     return legacy if legacy.is_file() else None
 
 
+def affected_chunk_ids_for_source_index(job_id: str, source_index: int) -> list[str]:
+    """Return translation chunk ids whose target range covers a source index.
+
+    Used by cue editing to invalidate only the affected chunk checkpoints
+    instead of wiping the whole translation layer when only text changed.
+    """
+    try:
+        return [
+            str(row["id"])
+            for row in db.translation_chunks(job_id)
+            if int(row["target_start"]) <= source_index <= int(row["target_end"])
+        ]
+    except (KeyError, TypeError, ValueError):
+        return []
+
+
 def _translation_plan(job_id: str, source: list[dict]) -> list[Chunk]:
     """Resume a persisted split plan when the process was restarted mid-translation."""
     existing = db.translation_chunks(job_id)

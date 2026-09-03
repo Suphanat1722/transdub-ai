@@ -22,17 +22,13 @@ def put_local_settings(settings: LocalSettings) -> dict:
 
 
 def _read_env() -> dict[str, str]:
-    """Return the current .env entries as a dict of key=value."""
-    if not (ROOT / ".env").is_file():
+    """Return the current .env entries (handles quotes/= via python-dotenv)."""
+    from dotenv import dotenv_values
+
+    env_file = ROOT / ".env"
+    if not env_file.is_file():
         return {}
-    values: dict[str, str] = {}
-    for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    return values
+    return {k: v for k, v in dotenv_values(env_file).items() if v is not None}
 
 
 @router.get("/api-key")
@@ -44,13 +40,15 @@ def get_api_key() -> dict:
 @router.put("/api-key")
 def set_api_key(request: ApiKeyRequest) -> dict:
     """Store the Gemini API key in .env (and apply it to this process immediately)."""
+    from dotenv import set_key
+
     key = request.api_key.strip()
     if not key:
         raise HTTPException(422, "กรุณาใส่ API key")
-    values = _read_env()
-    values["GEMINI_API_KEY"] = key
-    lines = [f"{k}={v}" for k, v in values.items()]
+    env_file = ROOT / ".env"
     os.makedirs(ROOT, exist_ok=True)
-    (ROOT / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if not env_file.is_file():
+        env_file.touch()
+    set_key(str(env_file), "GEMINI_API_KEY", key)
     os.environ["GEMINI_API_KEY"] = key
     return {"configured": True}

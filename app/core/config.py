@@ -18,10 +18,6 @@ DB_PATH = DATA_DIR / "app.db"
 STATIC_DIR = ROOT / "app" / "static"
 
 EDGE_TTS_DEFAULT_VOICE = "th-TH-NiwatNeural"
-# Edge TTS rate is raised in these steps (percent) until a cue fits its slot
-# without cutting words, capped at MAX_TTS_RATE.
-RATE_STEP = 10
-MAX_TTS_RATE = 50
 TRANSLATION_MODELS = tuple(
     value.strip()
     for value in os.getenv(

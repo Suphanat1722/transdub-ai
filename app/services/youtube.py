@@ -26,6 +26,30 @@ THAI_LANGUAGE = "th"
 # detected original language are always tried before these.
 FALLBACK_LANGUAGES = ("en", THAI_LANGUAGE)
 
+# Every yt-dlp request presents a real Chrome TLS fingerprint so a blocked IP is
+# less likely to trip the "Sign in to confirm you're not a bot" check.  Building
+# the target is lazy because it imports from yt-dlp, which is optional at module
+# load time (e.g. running docs/tests without the network stack).
+_IMPERSONATE = None
+
+
+def _impersonate_target() -> object:
+    """Return the yt-dlp ImpersonateTarget for Chrome, or None if unavailable.
+
+    yt-dlp requires this to be an ``ImpersonateTarget`` object (a bare string
+    trips an internal type assertion), and it only applies when the curl_cffi
+    backend is installed -- which also powers the TLS impersonation.
+    """
+    global _IMPERSONATE
+    if _IMPERSONATE is None:
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+
+            _IMPERSONATE = ImpersonateTarget.from_str("chrome")
+        except Exception:
+            _IMPERSONATE = False
+    return _IMPERSONATE or None
+
 
 class YouTubeError(RuntimeError):
     """An error downloading a video or fetching subtitles, safe to show in the UI."""
@@ -91,7 +115,7 @@ def _proxy_url() -> str | None:
 
 
 def _base_options(target_dir: Path) -> dict:
-    """yt-dlp options shared across attempts: output, proxy and quiet flags."""
+    """yt-dlp options shared across attempts: output, proxy, impersonation and quiet."""
     options = {
         "outtmpl": str(target_dir / "youtube.%(ext)s"),
         "merge_output_format": "mp4",
@@ -99,6 +123,13 @@ def _base_options(target_dir: Path) -> dict:
         "quiet": True,
         "no_warnings": True,
     }
+    # Present a real Chrome TLS fingerprint (via curl_cffi) so a blocked IP
+    # is less likely to hit the "Sign in to confirm you're not a bot" check.
+    # Must be an ImpersonateTarget object: a bare string trips yt-dlp's
+    # internal type assertion at YoutubeDL init.
+    target = _impersonate_target()
+    if target is not None:
+        options["impersonate"] = target
     proxy = _proxy_url()
     if proxy:
         options["proxy"] = proxy
@@ -115,6 +146,11 @@ def _subtitle_options(outdir: Path) -> dict:
         "subtitlesformat": "srt",
         "outtmpl": str(outdir / "sub.%(ext)s"),
     }
+    # Mirror the download request's Chrome fingerprint so the same IP is not
+    # singled out as a bot when it also reads the captions.
+    target = _impersonate_target()
+    if target is not None:
+        options["impersonate"] = target
     proxy = _proxy_url()
     if proxy:
         options["proxy"] = proxy

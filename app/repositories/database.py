@@ -94,15 +94,19 @@ def _run_alembic() -> None:
 
 
 def init_db() -> None:
-    if not _has_table("jobs"):
+    fresh = not _has_table("jobs")
+    if fresh:
         from alembic import command
 
         ensure_directories()
         command.upgrade(_alembic_configuration(), "head")
-    _run_alembic()
+    else:
+        _run_alembic()
     with connect() as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("DROP TABLE IF EXISTS quota_events")
+        # Safety net for DBs created before the fast-mode migration.
+        _add_column(conn, "jobs", "separation_mode TEXT NOT NULL DEFAULT 'demucs'")
         conn.execute(
             "UPDATE cues SET status='pending',error='กู้คืน cue ที่หยุดระหว่างสร้างเสียง' WHERE status='processing'"
         )
@@ -238,6 +242,7 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
         if not job:
             return None
         job["warnings"] = json.loads(job.pop("warnings_json"))
+        job.setdefault("separation_mode", "demucs")
         for key in (
             "pause_after_transcription",
             "pause_after_translation",
@@ -587,6 +592,7 @@ def create_video_job(
     output_dir: str | None = None,
     mode: str = "youtube",
     translation_prompt: str | None = None,
+    separation_mode: str = "demucs",
 ) -> dict:
     now = utc_now()
     seed = int.from_bytes(uuid.uuid4().bytes[:4], "big") & 0x7FFFFFFF
@@ -594,6 +600,7 @@ def create_video_job(
     effective_voice = voice or settings["voice"]
     effective_rate = int(tts_rate if tts_rate is not None else settings.get("tts_rate") or 0)
     effective_mode = mode if mode in {"youtube", "import", "import_pending"} else "youtube"
+    effective_separation = separation_mode if separation_mode in {"demucs", "fast"} else "demucs"
     # For a YouTube job, source_path holds the URL string until the worker
     # downloads the actual file (then it is replaced with the file path).  A
     # provided file path is relativized as before.
@@ -604,42 +611,82 @@ def create_video_job(
     else:
         source_path_value = data_relative(source_path)
     with connect() as conn:
-        conn.execute(
-            """INSERT INTO jobs(
-                id,filename,encoding,model,status,warnings_json,created_at,updated_at,
-                voice,tts_rate,max_start_delay_ms,seed,engine,
-                pipeline_revision,source_path,source_language,target_language,
-                pause_after_transcription,pause_after_translation,background_volume,voice_volume,
-                stage,progress,output_dir,mode,translation_prompt
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                job_id,
-                filename,
-                "utf-8",
-                "edge-tts",
-                "queued",
-                "[]",
-                now,
-                now,
-                effective_voice,
-                effective_rate,
-                settings["max_start_delay_ms"],
-                seed,
-                PIPELINE_REVISION,
-                source_path_value,
-                source_language or "auto",
-                "th",
-                int(pause_after_transcription),
-                int(pause_after_translation),
-                background_volume,
-                voice_volume,
-                "uploaded",
-                0,
-                output_dir or None,
-                effective_mode,
-                (translation_prompt or "").strip() or None,
-            ),
-        )
+        columns = _columns(conn, "jobs")
+        if "separation_mode" in columns:
+            conn.execute(
+                """INSERT INTO jobs(
+                    id,filename,encoding,model,status,warnings_json,created_at,updated_at,
+                    voice,tts_rate,max_start_delay_ms,seed,engine,
+                    pipeline_revision,source_path,source_language,target_language,
+                    pause_after_transcription,pause_after_translation,background_volume,voice_volume,
+                    stage,progress,output_dir,mode,translation_prompt,separation_mode
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    filename,
+                    "utf-8",
+                    "edge-tts",
+                    "queued",
+                    "[]",
+                    now,
+                    now,
+                    effective_voice,
+                    effective_rate,
+                    settings["max_start_delay_ms"],
+                    seed,
+                    PIPELINE_REVISION,
+                    source_path_value,
+                    source_language or "auto",
+                    "th",
+                    int(pause_after_transcription),
+                    int(pause_after_translation),
+                    background_volume,
+                    voice_volume,
+                    "uploaded",
+                    0,
+                    output_dir or None,
+                    effective_mode,
+                    (translation_prompt or "").strip() or None,
+                    effective_separation,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO jobs(
+                    id,filename,encoding,model,status,warnings_json,created_at,updated_at,
+                    voice,tts_rate,max_start_delay_ms,seed,engine,
+                    pipeline_revision,source_path,source_language,target_language,
+                    pause_after_transcription,pause_after_translation,background_volume,voice_volume,
+                    stage,progress,output_dir,mode,translation_prompt
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'transdub',?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    filename,
+                    "utf-8",
+                    "edge-tts",
+                    "queued",
+                    "[]",
+                    now,
+                    now,
+                    effective_voice,
+                    effective_rate,
+                    settings["max_start_delay_ms"],
+                    seed,
+                    PIPELINE_REVISION,
+                    source_path_value,
+                    source_language or "auto",
+                    "th",
+                    int(pause_after_transcription),
+                    int(pause_after_translation),
+                    background_volume,
+                    voice_volume,
+                    "uploaded",
+                    0,
+                    output_dir or None,
+                    effective_mode,
+                    (translation_prompt or "").strip() or None,
+                ),
+            )
     created = get_job(job_id, include_cues=False)
     if created is None:
         raise RuntimeError("สร้างงานแล้วแต่ไม่สามารถอ่านข้อมูลกลับได้")
@@ -893,6 +940,26 @@ def record_api_usage(
             "INSERT INTO api_usage(job_id,stage,model,requested_at,audio_seconds,total_tokens) VALUES(?,?,?,?,?,?)",
             (job_id, stage, model, utc_now(), audio_seconds, total_tokens),
         )
+
+
+def list_attempts(job_id: str, limit: int = 100) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT stage,unit_id,model,outcome,message,created_at FROM stage_attempts "
+            "WHERE job_id=? ORDER BY created_at DESC LIMIT ?",
+            (job_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_api_usage(job_id: str, limit: int = 100) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT stage,model,requested_at,audio_seconds,total_tokens FROM api_usage "
+            "WHERE job_id=? ORDER BY requested_at DESC LIMIT ?",
+            (job_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def put_artifact(job_id: str, kind: str, path: Path, media_type: str) -> None:

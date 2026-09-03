@@ -18,7 +18,13 @@ from ..services.translation import serialize_srt
 from ..services.worker import worker
 from ..services.youtube import extract_video_id
 from .dependencies import require_job
-from .schemas import CueEditRequest, JobActionRequest, JobSettingsRequest, TranslationPromptRequest
+from .schemas import (
+    CueEditRequest,
+    FolderCheckRequest,
+    JobActionRequest,
+    JobSettingsRequest,
+    TranslationPromptRequest,
+)
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
@@ -74,6 +80,21 @@ def pick_export_folder() -> dict:
     return {"path": folder}
 
 
+@router.post("/validate-folder", status_code=200)
+def validate_export_folder(request: FolderCheckRequest) -> dict:
+    """Check an output folder path without opening a native dialog.
+
+    Works on headless/remote setups where tkinter cannot open a window.
+    Empty path means "use the job folder" and is always valid.
+    """
+    value = (request.path or "").strip()
+    if not value:
+        return {"ok": True, "path": None}
+    if not os.path.isdir(value):
+        raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {value}")
+    return {"ok": True, "path": value}
+
+
 @router.get("")
 def jobs() -> list[dict]:
     return [public_job(job) for job in db.list_jobs() if job.get("engine") == "transdub"]
@@ -91,11 +112,15 @@ def create_job(
     tts_rate: int = Form(0),
     output_dir: str = Form(""),
     translation_prompt: str = Form(""),
+    separation_mode: str = Form("demucs"),
 ) -> dict:
     if not 0 <= background_volume <= 150 or not 0 <= voice_volume <= 150:
         raise HTTPException(422, "ระดับเสียงต้องอยู่ระหว่าง 0–150 เปอร์เซ็นต์")
     if not -50 <= tts_rate <= 50:
         raise HTTPException(422, "ความเร็วเสียงพูดต้องอยู่ระหว่าง -50 ถึง +50 เปอร์เซ็นต์")
+    if separation_mode not in {"demucs", "fast"}:
+        # Checkbox ส่ง "fast" เมื่อติ๊ก (ไม่ติ๊กใช้ default "demucs"); ค่าอื่นถือเป็น demucs
+        separation_mode = "demucs"
     export_dir = output_dir.strip() or None
     if export_dir and not os.path.isdir(export_dir):
         raise HTTPException(422, f"โฟลเดอร์ส่งออกไม่มีอยู่จริง: {export_dir}")
@@ -122,6 +147,7 @@ def create_job(
             output_dir=export_dir,
             mode="youtube",
             translation_prompt=translation_prompt.strip() or None,
+            separation_mode=separation_mode,
         )
     except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -133,6 +159,39 @@ def create_job(
 @router.get("/{job_id}")
 def job_detail(job_id: str) -> dict:
     return public_job(require_job(job_id))
+
+
+@router.get("/{job_id}/logs")
+def job_logs(job_id: str, limit: int = Query(100, ge=1, le=500)) -> dict:
+    """Return warnings/error plus recent stage attempts and API usage."""
+    job = require_job(job_id, include_cues=False)
+    return {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "stage": job.get("stage"),
+        "error": job.get("error"),
+        "warnings": job.get("warnings") or [],
+        "separation_mode": job.get("separation_mode") or "demucs",
+        "attempts": db.list_attempts(job_id, limit=limit),
+        "usage": db.list_api_usage(job_id, limit=limit),
+    }
+
+
+@router.get("/{job_id}/queue")
+def job_queue(job_id: str) -> dict:
+    """Return queue position for a waiting job (1 = next to run)."""
+    job = require_job(job_id, include_cues=False)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE engine='transdub' AND status='queued' "
+            "AND created_at<=?",
+            (job["created_at"],),
+        ).fetchone()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE engine='transdub' AND status='queued'"
+        ).fetchone()
+    position = int(row[0]) if job.get("status") == "queued" else 0
+    return {"job_id": job_id, "status": job.get("status"), "position": position, "queued": int(total[0])}
 
 
 @router.get("/{job_id}/events")
@@ -297,6 +356,14 @@ def edit_cue(job_id: str, cue_id: int, request: CueEditRequest) -> dict:
     if request.layer == "source":
         rows = db.source_cues(job_id)
         _validate_timeline(rows, cue_id, request.start_ms, request.end_ms)
+        previous_row = next((cue for cue in rows if cue["id"] == cue_id), None)
+        if previous_row is None:
+            raise HTTPException(404, "ไม่พบ source cue")
+        text_only = (
+            previous_row["text"].strip() != text
+            and previous_row["start_ms"] == request.start_ms
+            and previous_row["end_ms"] == request.end_ms
+        )
         updated = db.update_source_cue(
             cue_id, text=text, start_ms=request.start_ms, end_ms=request.end_ms
         )
@@ -305,12 +372,40 @@ def edit_cue(job_id: str, cue_id: int, request: CueEditRequest) -> dict:
         source_srt = resolve_data_path(job["source_srt_path"])
         source_srt.write_text(serialize_srt(db.source_cues(job_id), bom=True), encoding="utf-8")
         work_translation = JOBS_DIR / job_id / "work" / "translation"
-        for checkpoint in work_translation.glob("*.json") if work_translation.is_dir() else []:
-            checkpoint.unlink(missing_ok=True)
+        chunks = db.translation_chunks(job_id)
+        if text_only and chunks:
+            # Text-only edit: keep other chunks' Gemini checkpoints so the
+            # worker only re-translates the affected chunk(s).
+            from ..services.translation import affected_chunk_ids_for_source_index
+
+            edited_index = int(updated.get("position", 0) or 0) - 1
+            affected = set(affected_chunk_ids_for_source_index(job_id, edited_index))
+            by_id = {str(chunk["id"]): chunk for chunk in chunks}
+            if affected & set(by_id):
+                for chunk_id in affected & set(by_id):
+                    chunk = by_id[chunk_id]
+                    (work_translation / f"{chunk_id}.json").unlink(missing_ok=True)
+                    (work_translation / f"{int(chunk['chunk_index']):04d}.json").unlink(missing_ok=True)
+                    db.update_translation_chunk(chunk_id, status="pending", model=None, error=None)
+            else:
+                for checkpoint in work_translation.glob("*.json") if work_translation.is_dir() else []:
+                    checkpoint.unlink(missing_ok=True)
+                with db.connect() as conn:
+                    conn.execute(
+                        "UPDATE translation_chunks SET status='pending',model=NULL,error=NULL WHERE job_id=?",
+                        (job_id,),
+                    )
+        else:
+            for checkpoint in work_translation.glob("*.json") if work_translation.is_dir() else []:
+                checkpoint.unlink(missing_ok=True)
+            with db.connect() as conn:
+                conn.execute(
+                    "UPDATE translation_chunks SET status='pending',model=NULL,error=NULL WHERE job_id=?",
+                    (job_id,),
+                )
         shutil.rmtree(JOBS_DIR / job_id / "cues", ignore_errors=True)
         with db.connect() as conn:
             conn.execute("DELETE FROM cues WHERE job_id=?", (job_id,))
-            conn.execute("UPDATE translation_chunks SET status='pending',model=NULL,error=NULL WHERE job_id=?", (job_id,))
         db.delete_artifacts(
             job_id,
             {"translated_srt", "dub_wav", "dub_mp3", "report_json", "report_csv", "final_video"},

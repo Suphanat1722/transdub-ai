@@ -67,3 +67,7 @@ class LocalSettings(BaseModel):
 
 class ApiKeyRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=500)
+
+
+class FolderCheckRequest(BaseModel):
+    path: str = Field(default="", max_length=500)

@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <div><span class="mark">TD</span><strong>TransDub AI</strong><small>พากย์วิดีโอไทยครบสายงาน</small></div>
-    <span id="health" class="health">กำลังตรวจระบบ…</span>
+    <span class="topbar-right"><span id="health" class="health">กำลังตรวจระบบ…</span><button id="toast-history-toggle" class="secondary small" title="ดูประวัติแจ้งเตือน">ประวัติ</button></span>
   </header>
 
   <main>
@@ -20,6 +20,7 @@
     </section>
 
     <section id="system-warning" class="warning" hidden></section>
+    <div id="toast-log" class="toast-log" hidden></div>
 
     <section class="card api-key-card" id="api-key-card" hidden>
       <div class="card-head">
@@ -41,54 +42,83 @@
       <aside>
         <button id="new-job-tab" class="primary wide">＋ สร้างงานใหม่</button>
         <div class="aside-head"><span>งานทั้งหมด</span><button id="refresh-jobs">↻</button></div>
+        <div id="job-counts" class="job-counts"></div>
+        <input id="job-search" type="search" placeholder="ค้นหางาน…">
+        <div class="job-filters">
+          <button data-filter="all" class="active">ทั้งหมด</button><button data-filter="active">กำลังทำ</button><button data-filter="review">รอตรวจ</button><button data-filter="done">เสร็จ</button>
+        </div>
         <div id="job-list" class="job-list"></div>
+        <button id="bulk-delete-btn" class="secondary small wide" hidden>ลบงานที่จบแล้วทั้งหมด</button>
       </aside>
 
       <section class="workspace">
         <div id="create-panel">
           <h2>สร้างงานพากย์</h2>
+          <ol class="steps" id="create-steps">
+            <li data-step="1" class="active">1. วิดีโอ</li><li data-step="2">2. เสียง</li><li data-step="3">3. เริ่ม</li>
+          </ol>
 <form id="job-form">
-            <label class="drop" id="youtube-url-box">
-              <input id="youtube-url" name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
-              <span class="drop-icon">▶</span>
-              <strong>วางลิงก์ YouTube</strong>
-              <small>ระบบดาวน์โหลดวิดีโอและดึงคำบรรยายจาก YouTube ให้อัตโนมัติ</small>
-            </label>
-            <div class="voice-toolbar">
-              <input id="voice-search" type="search" placeholder="ค้นหาเสียงพากย์ เช่น Niwat, Premwadee">
-              <label class="check-inline"><input id="show-all-voices" type="checkbox"> แสดงเสียงภาษาอื่น</label>
-            </div>
-            <div class="grid two">
+            <fieldset class="wizard-step" data-step="1">
+              <label class="drop" id="youtube-url-box">
+                <input id="youtube-url" name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
+                <span class="drop-icon">▶</span>
+                <strong>วางลิงก์ YouTube</strong>
+                <small>ระบบดาวน์โหลดวิดีโอและดึงคำบรรยายจาก YouTube ให้อัตโนมัติ</small>
+              </label>
+              <p class="muted-note" id="url-msg"></p>
+              <div class="wizard-nav"><button type="button" class="primary" id="to-step-2">ถัดไป →</button></div>
+            </fieldset>
+            <fieldset class="wizard-step" data-step="2" hidden>
+              <div class="voice-toolbar">
+                <input id="voice-search" type="search" placeholder="ค้นหาเสียงพากย์ เช่น Niwat, Premwadee">
+                <label class="check-inline"><input id="show-all-voices" type="checkbox"> แสดงเสียงภาษาอื่น</label>
+              </div>
               <label>เสียงพากย์ (Edge TTS)
                 <select id="voice-select" name="voice" required></select>
               </label>
-              <label>ภาษาต้นฉบับ
-                <input name="source_language" value="auto" placeholder="auto หรือ en-US">
-              </label>
-            </div>
-            <div class="grid two sliders">
-              <label>เสียงพื้นหลัง <output id="background-value">100%</output>
-                <input name="background_volume" type="range" min="0" max="150" value="100">
-              </label>
-              <label>เสียงพากย์ <output id="voice-value">100%</output>
-                <input name="voice_volume" type="range" min="0" max="150" value="100">
-              </label>
-            </div>
-            <div class="grid two">
-              <label>อัตราการพูด <output id="tts-rate-value">0%</output>
-                <input name="tts_rate" type="range" min="-50" max="50" value="0">
-              </label>
-              <label>โฟลเดอร์ส่งออกวิดีโอ
-                <input name="output_dir" id="output-dir" placeholder="ว่าง = เก็บไว้ในโฟลเดอร์งาน">
-                <button type="button" id="pick-folder-btn" class="secondary">เลือกโฟลเดอร์…</button>
-              </label>
-            </div>
+              <p class="muted-note" id="voice-hint">ค่าเริ่มต้นวิ่งอัตโนมัติจนจบ ไม่พักรอตรวจ — เปิด “ตั้งค่าขั้นสูง” ถ้าอยากตรวจก่อนแปล/ก่อนสร้างเสียง</p>
+              <div class="wizard-nav"><button type="button" class="secondary" id="back-step-1">← กลับ</button><button type="button" class="primary" id="to-step-3">ถัดไป →</button></div>
+            </fieldset>
+            <fieldset class="wizard-step" data-step="3" hidden>
+              <p class="muted-note" id="create-summary"></p>
+              <details class="advanced">
+                <summary>ตั้งค่าขั้นสูง (ภาษา / เสียง / โฟลเดอร์ / จุดพัก)</summary>
+                <div class="grid two">
+                  <label>ภาษาต้นฉบับ
+                    <input name="source_language" value="auto" placeholder="auto หรือ en-US">
+                  </label>
+                  <label>อัตราการพูด <output id="tts-rate-value">0%</output>
+                    <input name="tts_rate" type="range" min="-50" max="50" value="0">
+                  </label>
+                </div>
+                <div class="grid two sliders">
+                  <label>เสียงพื้นหลัง <output id="background-value">100%</output>
+                    <input name="background_volume" type="range" min="0" max="150" value="100">
+                  </label>
+                  <label>เสียงพากย์ <output id="voice-value">100%</output>
+                    <input name="voice_volume" type="range" min="0" max="150" value="100">
+                  </label>
+                </div>
+                <label>โฟลเดอร์ส่งออกวิดีโอ
+                  <span class="folder-row">
+                    <input name="output_dir" id="output-dir" placeholder="ว่าง = เก็บไว้ในโฟลเดอร์งาน">
+                    <button type="button" id="pick-folder-btn" class="secondary">เลือก…</button>
+                    <button type="button" id="check-folder-btn" class="secondary" title="ตรวจว่าโฟลเดอร์ใช้ได้">ตรวจ</button>
+                  </span>
+                  <small class="muted-note" id="folder-msg"></small>
+                </label>
+                <label>Prompt สำหรับแปล (ส่งเป็น system prompt ให้ Gemini, ว่าง = ค่าเริ่มต้น)
+                  <textarea name="translation_prompt" id="create-prompt" rows="3" placeholder="ว่าง = ใช้ค่าเริ่มต้นระบบ"></textarea>
+                </label>
 <div class="checks">
-              <label><input name="pause_after_transcription" type="checkbox" checked> พักก่อนแปล (เฉพาะซับที่ไม่ใช่ภาษาไทย)</label>
-              <label><input name="pause_after_translation" type="checkbox" checked> พักเพื่อตรวจคำแปล</label>
-            </div>
-            <button class="primary wide" type="submit">เริ่มพากย์</button>
-            <div id="upload-progress" class="upload-progress" hidden><span></span></div>
+                  <label title="ข้าม Demucs (เร็วหลายเท่า ใช้เสียงต้นฉบับเป็นพื้นหลัง)"><input name="separation_mode" type="checkbox" value="fast"> โหมดเร็ว: ข้าม Demucs (ไม่แยกเสียงพูด)</label>
+                  <label><input name="pause_after_transcription" type="checkbox"> พักก่อนแปล (เฉพาะซับที่ไม่ใช่ภาษาไทย)</label>
+                  <label><input name="pause_after_translation" type="checkbox"> พักเพื่อตรวจคำแปล</label>
+                </div>
+              </details>
+              <div class="wizard-nav"><button type="button" class="secondary" id="back-step-2">← กลับ</button><button class="primary wide" type="submit" id="create-submit">เริ่มพากย์</button></div>
+              <p class="muted-note" id="create-progress" hidden>กำลังสร้างงาน…</p>
+            </fieldset>
           </form>
         </div>
 
@@ -144,6 +174,7 @@
 
           <section class="card">
             <div class="card-head"><h3>ไฟล์ผลลัพธ์</h3></div>
+            <div id="preview-player" class="preview-player" hidden></div>
             <div id="artifacts" class="artifacts"></div>
           </section>
 
@@ -152,14 +183,33 @@
               <h3>ตรวจและแก้ข้อความ</h3>
               <div class="tabs"><button data-layer="source" class="active">ต้นฉบับ</button><button data-layer="translation">คำแปลไทย</button></div>
             </div>
+            <div class="editor-toolbar">
+              <input id="cue-search" type="search" placeholder="ค้นหา cue… (กรองในหน้านี้)">
+              <button id="save-all-cues" class="secondary" title="บันทึก cue ที่แก้ค้างทั้งหมดในหน้านี้">บันทึกทั้งหมด</button>
+            </div>
             <div id="cue-list" class="cue-list"></div>
             <div class="pager"><button id="prev-page">← ก่อนหน้า</button><span id="page-info"></span><button id="next-page">ถัดไป →</button></div>
+          </section>
+
+          <section class="card" id="logs-card" hidden>
+            <div class="card-head"><h3>บันทึกงาน</h3><button id="logs-toggle" class="secondary small">แสดง</button></div>
+            <div id="logs-body" hidden></div>
           </section>
         </div>
       </section>
     </div>
   </main>
   <div id="toast" class="toast" hidden></div>
+  <div id="confirm-modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <h3 id="confirm-title">ยืนยัน?</h3>
+      <p id="confirm-msg"></p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="secondary">ยกเลิก</button>
+        <button id="confirm-ok" class="primary">ยืนยัน</button>
+      </div>
+    </div>
+  </div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -33,8 +33,58 @@ function toast(message, bad = false) {
   element.textContent = message;
   element.className = `toast ${bad ? "bad" : ""}`;
   element.hidden = false;
+  element.title = "คลิกเพื่อคัดลอก";
+  element.onclick = async () => {
+    try { await navigator.clipboard.writeText(message); } catch { /* clipboard ไม่พร้อม */ }
+  };
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { element.hidden = true; }, 4000);
+  toast.timer = setTimeout(() => { element.hidden = true; }, 6000);
+  toast.history = toast.history || [];
+  toast.history.unshift({ at: new Date().toLocaleString("th-TH"), message, bad });
+  if (toast.history.length > 30) toast.history.length = 30;
+  renderToastLog();
+}
+
+function renderToastLog() {
+  const log = $("#toast-log");
+  if (!log) return;
+  const items = toast.history || [];
+  log.innerHTML = items.length
+    ? items.map((item) => `<p class="${item.bad ? "bad" : ""}"><span>${escapeHtml(item.at)}</span> ${escapeHtml(item.message)}</p>`).join("")
+    : '<p class="empty">ยังไม่มีแจ้งเตือน</p>';
+}
+
+function confirmModal({ title = "ยืนยัน?", message = "", okLabel = "ยืนยัน" } = {}) {
+  const modal = $("#confirm-modal");
+  $("#confirm-title").textContent = title;
+  $("#confirm-msg").textContent = message;
+  $("#confirm-ok").textContent = okLabel;
+  modal.hidden = false;
+  return new Promise((resolve) => {
+    const done = (value) => {
+      modal.hidden = true;
+      $("#confirm-ok").onclick = null;
+      $("#confirm-cancel").onclick = null;
+      modal.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
+    const onKey = (event) => { if (event.key === "Escape") done(false); };
+    $("#confirm-ok").onclick = () => done(true);
+    $("#confirm-cancel").onclick = () => done(false);
+    modal.onclick = (event) => { if (event.target === modal) done(false); };
+    document.addEventListener("keydown", onKey);
+    $("#confirm-ok").focus();
+  });
+}
+
+function parseTimestamp(value) {
+  // รับทั้ง ms (ตัวเลข) และ HH:MM:SS,mmm / MM:SS.mmm
+  if (/^\d+$/.test(value.trim())) return Number(value.trim());
+  const match = value.trim().match(/^(?:(\d+):)?([0-5]?\d):([0-5]?\d)[,.](\d{1,3})$/);
+  if (!match) return NaN;
+  const [, h = "0", m, s, ms] = match;
+  return Number(h) * 3_600_000 + Number(m) * 60_000 + Number(s) * 1000 + Number(`${ms}`.padEnd(3, "0"));
 }
 
 function formatSize(bytes) {
@@ -68,7 +118,10 @@ async function loadHealth() {
     // exactly where the user notices the missing key in the warning.
     if (!health.gemini_configured) {
       const card = $("#api-key-card");
-      if (card && !$("#job-panel").classList.contains("visible")) card.hidden = false;
+      // job-panel ใช้ hidden เป็น source of truth (ไม่มี class visible)
+      if (card && $("#job-panel").hidden) card.hidden = false;
+    } else {
+      $("#api-key-card").hidden = true;
     }
   } catch (error) { $("#health").textContent = "● เชื่อมต่อ backend ไม่ได้"; }
 }
@@ -83,6 +136,10 @@ async function loadVoices() {
   const select = $("#voice-select");
   if (state.defaultVoice && [...select.options].some((option) => option.value === state.defaultVoice)) {
     select.value = state.defaultVoice;
+  }
+  const hint = $("#voice-hint");
+  if (hint && !state.voices.length) {
+    hint.textContent = "ดึงรายชื่อเสียงจาก Edge TTS ไม่ได้ (ต้องต่อเน็ต) — ใส่ชื่อเสียงเองได้ เช่น th-TH-NiwatNeural แล้วกดเริ่มงาน";
   }
   if (state.current) fillJobSettingsInputs(state.current);
 }
@@ -103,7 +160,13 @@ function populateVoiceSelect(select, showAll, filter) {
   if (!select) return;
   const { thai, others } = voiceGroups(showAll, filter);
   if (!thai.length && !others.length) {
-    select.innerHTML = `<option value="">${state.voices.length ? "ไม่พบเสียงที่ค้นหา" : "ไม่พบเสียง (Edge TTS เข้าถึงไม่ได้)"}</option>`;
+    if (!state.voices.length) {
+      // Fallback เสียงไทยยอดนิยมเมื่อ Edge TTS เข้าถึงไม่ได้ — ยังส่งงานต่อได้
+      const fallback = ["th-TH-NiwatNeural", "th-TH-PremwadeeNeural", "th-TH-AcharaNeural"];
+      select.innerHTML = fallback.map((name) => `<option value="${name}">${name} (ออฟไลน์)</option>`).join("");
+      return;
+    }
+    select.innerHTML = `<option value="">ไม่พบเสียงที่ค้นหา</option>`;
     return;
   }
   const option = (voice) => `<option value="${escapeHtml(voice.short_name)}">${escapeHtml(voice.label)}</option>`;
@@ -125,14 +188,50 @@ async function loadJobs() {
   renderJobList();
 }
 
+function jobMatchesFilter(job, filter) {
+  if (filter === "active") return ACTIVE_STATUSES.includes(job.status);
+  if (filter === "review") return ["reviewing_transcript", "reviewing_translation", "needs_review", "paused", "failed", "waiting_quota"].includes(job.status);
+  if (filter === "done") return ["completed", "cancelled"].includes(job.status);
+  return true;
+}
+
 function renderJobList() {
-  $("#job-list").innerHTML = state.jobs.length ? state.jobs.map((job) => `
+  const filter = document.querySelector(".job-filters .active")?.dataset.filter || "all";
+  const needle = ($("#job-search")?.value || "").trim().toLowerCase();
+  const counts = { all: state.jobs.length, active: 0, review: 0, done: 0 };
+  state.jobs.forEach((job) => {
+    if (jobMatchesFilter(job, "active")) counts.active += 1;
+    if (jobMatchesFilter(job, "review")) counts.review += 1;
+    if (jobMatchesFilter(job, "done")) counts.done += 1;
+  });
+  const countsEl = $("#job-counts");
+  if (countsEl) countsEl.textContent = `ทั้งหมด ${counts.all} · กำลังทำ ${counts.active} · รอตรวจ ${counts.review} · เสร็จ ${counts.done}`;
+  const visible = state.jobs.filter((job) => jobMatchesFilter(job, filter)
+    && (!needle || (job.filename || "").toLowerCase().includes(needle) || job.id.toLowerCase().includes(needle)));
+  $("#job-list").innerHTML = visible.length ? visible.map((job) => `
     <button class="job-item ${state.current?.id === job.id ? "active" : ""}" data-id="${job.id}">
       <strong>${escapeHtml(job.filename)}</strong>
       <span>${statusNames[job.status] || job.status}</span>
       <i><b style="width:${Number(job.progress || 0)}%"></b></i>
-    </button>`).join("") : '<p class="empty">ยังไม่มีงาน</p>';
+    </button>`).join("") : '<p class="empty">ไม่พบงานตามเงื่อนไข</p>';
   document.querySelectorAll(".job-item").forEach((button) => button.onclick = () => openJob(button.dataset.id));
+  const bulk = $("#bulk-delete-btn");
+  if (bulk) {
+    const finished = state.jobs.filter((job) => ["completed", "cancelled", "failed"].includes(job.status) && !ACTIVE_STATUSES.includes(job.status));
+    bulk.hidden = !finished.length;
+    bulk.textContent = finished.length ? `ลบงานที่จบแล้วทั้งหมด (${finished.length})` : "ลบงานที่จบแล้วทั้งหมด";
+    bulk.onclick = async () => {
+      const ok = await confirmModal({ title: "ลบงานที่จบแล้ว?", message: `ลบ ${finished.length} งานพร้อมไฟล์ทั้งหมด? งานที่กำลังทำจะไม่ถูกลบ`, okLabel: "ลบทั้งหมด" });
+      if (!ok) return;
+      let failed = 0;
+      for (const job of finished) {
+        try { await api(`/api/jobs/${job.id}`, { method: "DELETE" }); } catch { failed += 1; }
+      }
+      await loadJobs();
+      if (state.current && finished.some((job) => job.id === state.current.id)) showCreate();
+      toast(failed ? `ลบเสร็จ มีพลาด ${failed} งาน` : `ลบ ${finished.length - failed} งานแล้ว`, !!failed);
+    };
+  }
 }
 
 function escapeHtml(value = "") {
@@ -146,6 +245,24 @@ function showCreate() {
   const btn = $("#delete-job-btn");
   if (btn) btn.onclick = null;
   renderJobList();
+  showStep(1);
+}
+
+function showStep(n) {
+  state.step = n;
+  document.querySelectorAll(".wizard-step").forEach((step) => { step.hidden = Number(step.dataset.step) !== n; });
+  document.querySelectorAll("#create-steps li").forEach((item) => item.classList.toggle("active", Number(item.dataset.step) === n));
+  if (n === 3) {
+    const url = $("#youtube-url").value.trim();
+    const voice = $("#voice-select").value || "(ยังไม่เลือกเสียง)";
+    const fast = document.querySelector('input[name="separation_mode"]')?.checked ? " · โหมดเร็ว (ข้าม Demucs)" : "";
+    $("#create-summary").textContent = `พร้อมเริ่ม: ${url} · เสียง ${voice}${fast}`;
+  }
+}
+
+function validYoutubeUrl(value) {
+  const url = (value || "").trim().toLowerCase();
+  return url.includes("youtube.com/") || url.includes("youtu.be/");
 }
 
 async function openJob(id) {
@@ -155,21 +272,41 @@ async function openJob(id) {
   renderJob(); renderJobList();
   bindDeleteButton();
   state.offset = 0; await loadCues();
+  $("#logs-card").hidden = false;
+  if (!$("#logs-body").hidden) await loadLogs();
   if (state.events) state.events.close();
   if (!["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) {
-    state.events = new EventSource(`/api/jobs/${id}/events`);
-    state.events.onmessage = async (event) => {
+    connectEvents(id);
+  }
+}
+
+function connectEvents(id, retryCount = 0) {
+  if (state.events) { try { state.events.close(); } catch { /* ignore */ } }
+  const source = new EventSource(`/api/jobs/${id}/events`);
+  state.events = source;
+  source.onmessage = async (event) => {
       const previous = state.current;
       state.current = JSON.parse(event.data);
       renderJob(); await loadJobs();
+      if (!$("#logs-body").hidden) loadLogs();
       if (state.layer === "translation" && previous && state.current.total_cues !== previous.total_cues) {
         await loadCues();       // the translation layer was (re)built: re-render the page
       } else {
         syncCueRows();          // same set of cues: patch status bits in place
       }
-      if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) state.events.close();
+      if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) source.close();
     };
-  }
+  source.onerror = () => {
+    $("#job-message").textContent = "การเชื่อมต่อขาดหาย กำลังลองเชื่อมต่อใหม่… (กดรีเฟรชงานได้)";
+    source.close();
+    if (retryCount < 10 && state.current && state.current.id === id) {
+      setTimeout(() => {
+        if (state.current && state.current.id === id && !["completed", "failed", "cancelled"].includes(state.current.status)) {
+          connectEvents(id, retryCount + 1);
+        }
+      }, 3000);
+    }
+  };
 }
 
 function renderJob() {
@@ -178,21 +315,43 @@ function renderJob() {
   $("#job-name").textContent = job.filename;
   $("#job-status").textContent = statusNames[job.status] || job.status;
   $("#job-status").className = `badge ${job.status}`;
-  $("#job-progress").style.width = `${Number(job.progress || 0)}%`;
+  const progressBar = $("#job-progress");
+  progressBar.style.width = `${Number(job.progress || 0)}%`;
+  progressBar.parentElement.title = `ขั้น ${stageNames[job.stage] || job.stage} · ${Number(job.progress || 0).toFixed(0)}%`;
   renderTranslationProgress(job);
-  let message = job.error || job.wait_reason || `คืบหน้า ${Number(job.progress || 0).toFixed(0)}%`;
+  let message = job.error || job.wait_reason || `คืบหน้า ${Number(job.progress || 0).toFixed(0)}% · ขั้น ${stageNames[job.stage] || job.stage}`;
+  const tp = job.translation_progress;
+  if (tp && tp.chunks_total && ["translating", "waiting_quota"].includes(job.status)) {
+    message += ` · แปลช่วง ${tp.current_chunk || 0}/${tp.chunks_total}`;
+    if (job.translation_model) message += ` (${job.translation_model})`;
+  }
   if (job.stage === "synthesizing" && job.total_cues) {
     const done = job.completed_cues || 0;
     const total = job.total_cues;
     const cueNo = done < total ? done + 1 : total;
-    message = `กําลังสร้างเสียง cue ${cueNo}/${total} (${done} เสร็จ)`;
+    message = `กําลังสร้างเสียง cue ${cueNo}/${total} (${done} เสร็จ) · ${Number(job.progress || 0).toFixed(0)}%`;
   }
   $("#job-message").textContent = message;
-  const order = ["uploaded", "extracted", "separated", "transcribed", "translated", "synthesizing", "synthesized", "completed"];
-  const current = Math.max(0, order.indexOf(job.stage));
+  // รวม synthesizing+synthesized เป็นขั้นเดียว "สร้างเสียง" ให้ตรงความรู้สึกผู้ใช้
+  const order = ["uploaded", "extracted", "separated", "transcribed", "translated", "synthesizing", "completed"];
+  const stageKey = job.stage === "synthesized" ? "synthesizing" : job.stage;
+  const current = Math.max(0, order.indexOf(stageKey));
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
   $("#job-warnings").innerHTML = (job.warnings || []).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
   renderActions(job); renderArtifacts(job.artifacts || []); renderTranslationTools(job); renderJobSettings(job);
+  if (job.status === "queued") loadQueue(job);
+}
+
+async function loadQueue(job) {
+  const now = Date.now();
+  if (loadQueue.at && now - loadQueue.at < 5000 && loadQueue.for === job.id) return;
+  loadQueue.at = now; loadQueue.for = job.id;
+  try {
+    const queue = await api(`/api/jobs/${job.id}/queue`);
+    if (state.current && state.current.id === job.id && queue.position > 0) {
+      $("#job-message").textContent += ` · คิวที่ ${queue.position} จาก ${queue.queued} งานรอ`;
+    }
+  } catch { /* queue ไม่พร้อม ไม่ต้องบล็อก UI */ }
 }
 
 function renderTranslationTools(job) {
@@ -259,7 +418,8 @@ async function saveJobSettings() {
   if (outputDir !== (job.output_dir || "")) body.output_dir = outputDir;
   if (!Object.keys(body).length) { toast("ยังไม่มีอะไรเปลี่ยน"); return; }
   if ((body.voice || body.tts_rate !== undefined) && job.total_cues) {
-    if (!confirm("เปลี่ยนเสียง/อัตราการพูดจะลบเสียงที่สร้างไว้และสร้างใหม่ทั้งหมด (ข้อความและคำแปลคงเดิม) ทำต่อไหม?")) return;
+    const ok = await confirmModal({ title: "สร้างเสียงใหม่ทั้งหมด?", message: "เปลี่ยนเสียง/อัตราการพูดจะลบเสียงที่สร้างไว้และสร้างใหม่ทั้งหมด (ข้อความและคำแปลคงเดิม) ทำต่อไหม?", okLabel: "สร้างใหม่" });
+    if (!ok) return;
   }
   try {
     state.current = await api(`/api/jobs/${job.id}`, {
@@ -310,7 +470,8 @@ function bindDeleteButton() {
 
 async function runAction(action) {
   if (action === "delete") {
-    if (!confirm("ลบงานนี้พร้อมไฟล์ผลลัพธ์ทั้งหมด? การกระทํานี้ย้อนกลับไม่ได้")) return;
+    const ok = await confirmModal({ title: "ลบงานนี้?", message: "ลบงานนี้พร้อมไฟล์ผลลัพธ์ทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้", okLabel: "ลบงาน" });
+    if (!ok) return;
     try {
       await api(`/api/jobs/${state.current.id}`, { method: "DELETE" });
       toast("ลบงานแล้ว"); state.events?.close(); await loadJobs(); showCreate();
@@ -327,14 +488,30 @@ async function runAction(action) {
 function renderArtifacts(items) {
   const labels = { background: "เสียงพื้นหลัง", source_srt: "SRT ต้นฉบับ", translated_srt: "SRT ภาษาไทย", dub_wav: "เสียงพากย์ WAV", dub_mp3: "เสียงพากย์ MP3", report_json: "รายงาน JSON", report_csv: "รายงาน CSV", final_video: "วิดีโอพากย์ไทย" };
   $("#artifacts").innerHTML = items.length ? items.map((item) => `<a href="${item.download_url}"><span>↓</span>${labels[item.kind] || item.kind}</a>`).join("") : '<p class="empty">ไฟล์จะปรากฏเมื่อแต่ละขั้นเสร็จ</p>';
+  const player = $("#preview-player");
+  if (!player) return;
+  const video = items.find((item) => item.kind === "final_video");
+  const audio = items.find((item) => item.kind === "dub_mp3") || items.find((item) => item.kind === "dub_wav");
+  if (video) {
+    player.hidden = false;
+    player.innerHTML = `<video controls preload="metadata" src="${video.download_url}"></video><p class="muted-note">ตัวอย่างวิดีโอสุดท้าย — ถ้าเล่นไม่ได้ให้กด ↓ ดาวน์โหลดแทน</p>`;
+  } else if (audio) {
+    player.hidden = false;
+    player.innerHTML = `<audio controls preload="metadata" src="${audio.download_url}"></audio><p class="muted-note">ฟังเสียงพากย์ฉบับเต็มก่อนรวมวิดีโอ</p>`;
+  } else {
+    player.hidden = true;
+    player.innerHTML = "";
+  }
 }
 
 async function loadCues() {
   if (!state.current) return;
   const data = await api(`/api/jobs/${state.current.id}/cues?layer=${state.layer}&offset=${state.offset}&limit=${state.limit}`);
+  state.cueTotal = data.total;
   $("#cue-list").innerHTML = data.items.length ? data.items.map((cue) => `
     <article class="cue" data-id="${cue.id}">
-      <div class="cue-meta"><b>#${cue.position}</b><input class="start" type="number" value="${cue.start_ms}" min="0"><span>→</span><input class="end" type="number" value="${cue.end_ms}" min="1"><small>ms</small><small class="t-read"></small></div>
+      <div class="cue-meta"><b>#${cue.position}</b><input class="start" type="number" value="${cue.start_ms}" min="0" title="เวลาเริ่ม (ms)"><span>→</span><input class="end" type="number" value="${cue.end_ms}" min="1" title="เวลาจบ (ms)"><small>ms</small><small class="t-read"></small></div>
+      <div class="cue-ts"><input class="start-ts" value="${formatMs(cue.start_ms)}" title="เวลาเริ่ม HH:MM:SS,mmm"><span>→</span><input class="end-ts" value="${formatMs(cue.end_ms)}" title="เวลาจบ HH:MM:SS,mmm"><small class="cue-err" hidden></small></div>
       <textarea>${escapeHtml(cue.text)}</textarea>
       <div class="cue-foot"><span>${(cue.warnings || []).map(escapeHtml).join(" · ")}</span>
         <span class="cue-btns">
@@ -353,15 +530,94 @@ async function loadCues() {
   document.querySelectorAll(".cue-preview").forEach((button) => button.onclick = () => playCuePreview(button.closest(".cue")));
   document.querySelectorAll(".cue-regenerate").forEach((button) => button.onclick = () => regenerateCue(button.closest(".cue")));
   document.querySelectorAll(".cue").forEach((article) => {
-    const updateReadout = () => {
-      const start = Number(article.querySelector(".start").value || 0);
-      const end = Number(article.querySelector(".end").value || 0);
-      article.querySelector(".t-read").textContent = `${formatMs(start)} → ${formatMs(end)}`;
+    const start = article.querySelector(".start"), end = article.querySelector(".end");
+    const startTs = article.querySelector(".start-ts"), endTs = article.querySelector(".end-ts");
+    const readout = article.querySelector(".t-read"), err = article.querySelector(".cue-err");
+    const saveBtn = article.querySelector(".save-cue");
+    const syncFromMs = () => {
+      startTs.value = formatMs(Number(start.value || 0));
+      endTs.value = formatMs(Number(end.value || 0));
+      readout.textContent = "";
+      validateCueRow(article);
     };
-    article.querySelector(".start").oninput = updateReadout;
-    article.querySelector(".end").oninput = updateReadout;
-    updateReadout();
+    const syncFromTs = (which) => {
+      const parsed = parseTimestamp((which === "start" ? startTs : endTs).value);
+      if (!Number.isNaN(parsed)) (which === "start" ? start : end).value = parsed;
+      validateCueRow(article);
+    };
+    start.oninput = syncFromMs; end.oninput = syncFromMs;
+    startTs.oninput = () => syncFromTs("start"); endTs.oninput = () => syncFromTs("end");
+    article.querySelector("textarea").oninput = () => { article.classList.add("dirty"); updateSaveAll(); validateCueRow(article); };
+    start.oninput = (e) => { article.classList.add("dirty"); updateSaveAll(); syncFromMs(); };
+    end.oninput = (e) => { article.classList.add("dirty"); updateSaveAll(); syncFromMs(); };
+    err.hidden = true;
+    saveBtn.disabled = false;
   });
+  applyCueSearch();
+  updateSaveAll();
+  validateAllCueRows();
+}
+
+function cueRows() { return [...document.querySelectorAll(".cue")]; }
+
+function validateCueRow(article) {
+  const rows = cueRows();
+  const index = rows.indexOf(article);
+  const err = article.querySelector(".cue-err");
+  const saveBtn = article.querySelector(".save-cue");
+  const start = Number(article.querySelector(".start").value || 0);
+  const end = Number(article.querySelector(".end").value || 0);
+  let message = "";
+  if (!(end > start)) message = "เวลาจบต้องมากกว่าเวลาเริ่ม";
+  else if (index > 0 && start < Number(rows[index - 1].querySelector(".end").value || 0)) message = "เวลาเริ่มทับ cue ก่อนหน้า";
+  else if (index + 1 < rows.length && end > Number(rows[index + 1].querySelector(".start").value || 0)) message = "เวลาจบทับ cue ถัดไป";
+  err.textContent = message;
+  err.hidden = !message;
+  article.classList.toggle("invalid", !!message);
+  saveBtn.disabled = !!message;
+  return !message;
+}
+
+function validateAllCueRows() { cueRows().forEach(validateCueRow); }
+
+function applyCueSearch() {
+  const needle = ($("#cue-search")?.value || "").trim().toLowerCase();
+  cueRows().forEach((article) => {
+    const text = article.querySelector("textarea").value.toLowerCase();
+    const id = article.querySelector("b")?.textContent.toLowerCase() || "";
+    article.style.display = !needle || text.includes(needle) || id.includes(needle) ? "" : "none";
+  });
+}
+
+function updateSaveAll() {
+  const btn = $("#save-all-cues");
+  if (!btn) return;
+  const dirty = document.querySelectorAll(".cue.dirty").length;
+  btn.textContent = dirty ? `บันทึกทั้งหมด (${dirty})` : "บันทึกทั้งหมด";
+  btn.disabled = !dirty;
+}
+
+async function saveAllCues() {
+  const dirty = cueRows().filter((article) => article.classList.contains("dirty") && article.style.display !== "none");
+  if (!dirty.length) { toast("ยังไม่มีอะไรเปลี่ยน"); return; }
+  if (dirty.some((article) => article.classList.contains("invalid"))) { toast("มี cue เวลาทับกัน — แก้ก่อนบันทึก", true); return; }
+  // ถามครั้งเดียวแม้มี source-layer (จะล้างคำแปลทั้งงาน)
+  if (state.layer === "source" && state.current.cues?.length) {
+    const ok = await confirmModal({ title: "แก้ต้นฉบับล้างคำแปล?", message: `บันทึก ${dirty.length} cue ต้นฉบับจะลบคำแปลและเสียงทั้งหมด บันทึกต่อไหม?`, okLabel: "บันทึกต่อ" });
+    if (!ok) return;
+    for (const article of dirty) {
+      await saveCue(article, { skipConfirm: true });
+      article.classList.remove("dirty");
+    }
+  } else {
+    let failed = 0;
+    for (const article of dirty) {
+      try { await saveCue(article, { skipConfirm: true }); article.classList.remove("dirty"); }
+      catch { failed += 1; }
+    }
+    toast(failed ? `บันทึกเสร็จ มีพลาด ${failed} cue` : `บันทึก ${dirty.length} cue แล้ว`, !!failed);
+  }
+  updateSaveAll();
 }
 
 function hasBackground() {
@@ -418,7 +674,8 @@ function playCuePreview(element) {
 
 async function regenerateCue(element) {
   const id = element.dataset.id;
-  if (!confirm("สร้างเสียงของ cue นี้ใหม่?")) return;
+  const ok = await confirmModal({ title: "สร้างเสียง cue นี้ใหม่?", message: `สร้างเสียงของ cue #${element.querySelector("b")?.textContent || id} ใหม่?`, okLabel: "สร้างใหม่" });
+  if (!ok) return;
   try {
     await api(`/api/jobs/${state.current.id}/actions`, {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -429,11 +686,12 @@ async function regenerateCue(element) {
   } catch (error) { toast(error.message, true); }
 }
 
-async function saveCue(element) {
+async function saveCue(element, options = {}) {
   // Editing the source layer discards the whole translation layer downstream;
   // say so before doing it.
-  if (state.layer === "source" && state.current.cues?.length) {
-    if (!confirm("การแก้ต้นฉบับจะลบคำแปลและเสียงที่สร้างไว้ทั้งหมด แล้วแปล/สร้างเสียงใหม่ บันทึกต่อไหม?")) return;
+  if (!options.skipConfirm && state.layer === "source" && state.current.cues?.length) {
+    const ok = await confirmModal({ title: "แก้ต้นฉบับล้างคำแปล?", message: "การแก้ต้นฉบับจะลบคำแปลและเสียงที่สร้างไว้ทั้งหมด แล้วแปล/สร้างเสียงใหม่ บันทึกต่อไหม?", okLabel: "บันทึกต่อ" });
+    if (!ok) return;
   }
   try {
     await api(`/api/jobs/${state.current.id}/cues/${element.dataset.id}`, {
@@ -447,18 +705,45 @@ async function saveCue(element) {
   } catch (error) { toast(error.message, true); }
 }
 
-$("#job-form").onsubmit = (event) => {
+$("#job-form").onsubmit = async (event) => {
   event.preventDefault();
-  if (!$("#youtube-url").value.trim()) {
+  const urlInput = $("#youtube-url");
+  if (!urlInput.value.trim()) {
     toast("กรุณากรอกลิงก์ YouTube ก่อนเริ่มพากย์", true);
+    showStep(1); urlInput.focus();
     return;
   }
-  const form = new FormData(event.currentTarget); const request = new XMLHttpRequest();
-  $("#upload-progress").hidden = false;
-  request.open("POST", "/api/jobs"); request.responseType = "json";
-  request.upload.onprogress = (e) => { if (e.lengthComputable) $("#upload-progress span").style.width = `${e.loaded / e.total * 100}%`; };
-  request.onload = async () => { if (request.status < 300) { await loadJobs(); openJob(request.response.id); } else toast(request.response?.detail || "สร้างงานไม่สําเร็จ", true); $("#upload-progress").hidden = true; };
-  request.onerror = () => toast("สร้างงานไม่สําเร็จ (ตรวจอินเทอร์เน็ต)", true); $("#upload-progress").hidden = true; request.send(form);
+  if (!validYoutubeUrl(urlInput.value)) {
+    toast("ลิงก์ต้องเป็น YouTube (youtube.com หรือ youtu.be)", true);
+    showStep(1); urlInput.focus();
+    return;
+  }
+  if (!$("#voice-select").value) {
+    toast("กรุณาเลือกเสียงพากย์ก่อน", true);
+    showStep(2);
+    return;
+  }
+  const submit = $("#create-submit");
+  const progress = $("#create-progress");
+  submit.disabled = true;
+  if (progress) { progress.hidden = false; progress.textContent = "กำลังสร้างงาน…"; }
+  try {
+    const form = new FormData(event.currentTarget);
+    // checkbox ที่ไม่ติ๊กจะไม่ถูกส่ง — เติมให้ชัดว่า false
+    if (!form.has("pause_after_transcription")) form.append("pause_after_transcription", "false");
+    if (!form.has("pause_after_translation")) form.append("pause_after_translation", "false");
+    const response = await fetch("/api/jobs", { method: "POST", body: form });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.detail || "สร้างงานไม่สําเร็จ");
+    await loadJobs();
+    await openJob(body.id);
+    toast("สร้างงานแล้ว กำลังเริ่มพากย์อัตโนมัติ");
+  } catch (error) {
+    toast(error.message || "สร้างงานไม่สําเร็จ (ตรวจอินเทอร์เน็ต)", true);
+  } finally {
+    submit.disabled = false;
+    if (progress) progress.hidden = true;
+  }
 };
 
 function bindRanges() {
@@ -478,14 +763,89 @@ document.querySelectorAll(".tabs button").forEach((button) => button.onclick = a
 $("#prev-page").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadCues(); };
 $("#next-page").onclick = () => { state.offset += state.limit; loadCues(); };
 $("#new-job-tab").onclick = showCreate; $("#refresh-jobs").onclick = loadJobs;
+$("#to-step-2").onclick = () => {
+  const urlInput = $("#youtube-url");
+  if (!urlInput.value.trim()) { toast("กรุณากรอกลิงก์ YouTube ก่อน", true); urlInput.focus(); return; }
+  if (!validYoutubeUrl(urlInput.value)) {
+    $("#url-msg").textContent = "ลิงก์ต้องเป็น YouTube (youtube.com หรือ youtu.be)";
+    toast("ลิงก์ต้องเป็น YouTube", true); urlInput.focus(); return;
+  }
+  $("#url-msg").textContent = "";
+  showStep(2);
+};
+$("#back-step-1").onclick = () => showStep(1);
+$("#to-step-3").onclick = () => {
+  if (!$("#voice-select").value) { toast("กรุณาเลือกเสียงพากย์ก่อน", true); return; }
+  showStep(3);
+};
+$("#back-step-2").onclick = () => showStep(2);
+document.querySelectorAll("#create-steps li").forEach((item) => item.onclick = () => {
+  const target = Number(item.dataset.step);
+  if (target < (state.step || 1)) showStep(target);
+});
 $("#translation-prompt").addEventListener("input", () => { $("#translation-prompt").dataset.touched = "1"; });
 $("#save-prompt").onclick = savePrompt;
 
 $("#pick-folder-btn").onclick = async () => {
   try {
     const res = await api("/api/jobs/pick-folder", { method: "POST" });
-    if (res && res.path) $("#output-dir").value = res.path;
-  } catch (error) { toast(error.message, true); }
+    if (res && res.path) {
+      $("#output-dir").value = res.path;
+      $("#folder-msg").textContent = "";
+    } else {
+      toast("ไม่ได้เลือกโฟลเดอร์ (พิมพ์ path เองหรือกดปุ่มตรวจ)");
+    }
+  } catch (error) { toast(`${error.message} — พิมพ์ path เองแล้วกดปุ่มตรวจ`, true); }
+};
+
+$("#check-folder-btn").onclick = async () => {
+  const value = $("#output-dir").value.trim();
+  const msg = $("#folder-msg");
+  if (!value) { msg.textContent = "ว่าง = เก็บไว้ในโฟลเดอร์งาน (ใช้ได้)"; return; }
+  try {
+    const res = await api("/api/jobs/validate-folder", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ path: value }),
+    });
+    msg.textContent = res.ok ? "✓ โฟลเดอร์ใช้ได้" : "โฟลเดอร์นี้ใช้ไม่ได้";
+  } catch (error) { msg.textContent = error.message; }
+};
+
+async function loadLogs() {
+  if (!state.current) return;
+  const card = $("#logs-card");
+  card.hidden = false;
+  const body = $("#logs-body");
+  try {
+    const data = await api(`/api/jobs/${state.current.id}/logs`);
+    const attempts = (data.attempts || []).slice(-20).reverse();
+    body.innerHTML = `
+      <p class="muted-note">โหมดแยกเสียง: <b>${escapeHtml(data.separation_mode || "demucs")}</b> · error: ${escapeHtml(data.error || "-")} · warnings: ${(data.warnings || []).length}</p>
+      ${(data.warnings || []).map((w) => `<p>⚠ ${escapeHtml(w)}</p>`).join("")}
+      ${attempts.length ? `<table class="logs-table"><thead><tr><th>เวลา</th><th>ขั้น</th><th>ผล</th><th>รายละเอียด</th></tr></thead><tbody>${attempts.map((a) => `<tr><td>${escapeHtml((a.created_at || "").slice(0, 19).replace("T", " "))}</td><td>${escapeHtml(a.stage || "")}</td><td>${escapeHtml(a.outcome || "")}</td><td>${escapeHtml((a.message || a.model || "").slice(0, 160))}</td></tr>`).join("")}</tbody></table>` : '<p class="empty">ยังไม่มีบันทึกขั้น (งานเพิ่งสร้าง)</p>'}`;
+  } catch (error) {
+    body.innerHTML = `<p class="empty">โหลดบันทึกไม่สำเร็จ: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+$("#toast-history-toggle").onclick = () => {
+  const log = $("#toast-log");
+  log.hidden = !log.hidden;
+  $("#toast-history-toggle").textContent = log.hidden ? "ประวัติ" : "ซ่อน";
+};
+
+$("#job-search").oninput = renderJobList;
+document.querySelectorAll(".job-filters button").forEach((button) => button.onclick = () => {
+  document.querySelectorAll(".job-filters button").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  renderJobList();
+});
+$("#cue-search").oninput = applyCueSearch;
+$("#save-all-cues").onclick = saveAllCues;
+$("#logs-toggle").onclick = async () => {
+  const body = $("#logs-body");
+  body.hidden = !body.hidden;
+  $("#logs-toggle").textContent = body.hidden ? "แสดง" : "ซ่อน";
+  if (!body.hidden) await loadLogs();
 };
 
 $("#api-key-toggle").onclick = () => {

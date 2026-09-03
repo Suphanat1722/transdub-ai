@@ -280,9 +280,27 @@ class JobWorker:
         db.update_job(job_id, status="separating", progress=12, wait_reason=None)
         job_dir = JOBS_DIR / job_id
         background = job_dir / "artifacts" / "background.flac"
-        create_background_stem(
-            resolve_data_path(job["original_audio_path"]), job_dir / "work", background
-        )
+        if (job.get("separation_mode") or "demucs") == "fast":
+            # Fast mode: skip Demucs entirely, reuse the original mix as the
+            # background (user controls its level via background_volume at mux).
+            import shutil
+            import subprocess
+
+            background.parent.mkdir(parents=True, exist_ok=True)
+            original = resolve_data_path(job["original_audio_path"])
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", str(original),
+                 "-map", "0:a:0", "-c:a", "flac", "-compression_level", "8", str(background)],
+                capture_output=True, text=True,
+            )
+            if result.returncode:
+                raise RuntimeError(f"สร้างเสียงพื้นหลังโหมดเร็วไม่สำเร็จ: {result.stderr.strip()}")
+            shutil.rmtree(job_dir / "work" / "demucs", ignore_errors=True)
+            db.record_attempt(job_id, "separate", "ok", model="fast-copy", message="ข้าม Demucs (โหมดเร็ว)")
+        else:
+            create_background_stem(
+                resolve_data_path(job["original_audio_path"]), job_dir / "work", background
+            )
         db.put_artifact(job_id, "background", background, "audio/flac")
         db.update_job(
             job_id,
