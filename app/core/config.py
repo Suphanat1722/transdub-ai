@@ -26,13 +26,12 @@ TRANSLATION_MODELS = tuple(
     value.strip()
     for value in os.getenv(
         "TRANSLATION_MODELS",
-        "gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite",
+        "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash-lite",
     ).split(",")
     if value.strip()
 )
 HOST = "127.0.0.1"
 PORT = int(os.getenv("PORT", "8765"))
-MAX_VIDEO_BYTES = int(os.getenv("MAX_VIDEO_BYTES", str(8 * 1024**3)))
 SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
