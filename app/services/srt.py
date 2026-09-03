@@ -66,7 +66,41 @@ def parse_srt(data: bytes) -> ParsedSrt:
     if not text:
         raise SrtValidationError("ไฟล์ SRT ว่าง")
 
-    blocks = re.split(r"\n\s*\n", text)
+    # Group lines into cue blocks using a timecode line as the boundary.  A cue
+    # does not need a blank line to separate it: many tools export "rolled" SRT
+    # with no blank line between cues, which a blank-line split would collapse
+    # into a single cue.  A purely numeric line immediately before a timecode is
+    # detached as that cue's index; anything else stays as text.  For
+    # standards-conforming files this produces the same block layout as the
+    # former blank-line split.
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if line and TIME_RE.match(line):
+            # A timecode line starts a new cue.  A trailing purely-numeric line
+            # is that cue's index, so detach it; if the rest of ``current``
+            # holds a complete cue (it already contains a timecode), close it.
+            # A leading index before the *first* timecode (rolled SRT has no
+            # blank line to separate it) is kept as this cue's own start.
+            index_line = ""
+            if current and current[-1].strip().isdigit():
+                index_line = current.pop()
+            if current and any(TIME_RE.match(item.strip()) for item in current):
+                if any(item.strip() for item in current):
+                    blocks.append(current)
+                current = [index_line] + [line] if index_line else [line]
+            elif index_line and not any(item.strip() for item in current):
+                current = [index_line, line]
+            else:
+                if current and any(item.strip() for item in current):
+                    blocks.append(current)
+                current = [line]
+        else:
+            current.append(raw_line)
+    if current and any(item.strip() for item in current):
+        blocks.append(current)
+
     cues: list[ParsedCue] = []
     global_warnings: list[str] = []
     previous_end = -1
@@ -75,7 +109,7 @@ def parse_srt(data: bytes) -> ParsedSrt:
     numeric_indices: list[int] = []
 
     for block_no, block in enumerate(blocks, 1):
-        lines = [line.strip() for line in block.split("\n")]
+        lines = [line.strip() for line in block if line.strip()]
         if not any(lines):
             continue
         time_line = next((i for i, line in enumerate(lines) if "-->" in line), None)
