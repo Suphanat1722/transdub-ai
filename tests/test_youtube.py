@@ -66,47 +66,6 @@ def test_extract_video_id_variants() -> None:
     assert youtube.extract_video_id("") is None
 
 
-def test_build_transcript_api_uses_webshare_proxy(monkeypatch) -> None:
-    captured = {}
-    monkeypatch.setattr("app.services.youtube.youtube_proxy_settings", lambda: ("wsuser", "wspass", ""))
-    monkeypatch.setattr(
-        "youtube_transcript_api.YouTubeTranscriptApi",
-        lambda **kwargs: captured.setdefault("kwargs", kwargs) or object(),
-    )
-    youtube._build_transcript_api()
-    config = captured["kwargs"]["proxy_config"]
-    assert config.__class__.__name__ == "WebshareProxyConfig"
-    assert config.proxy_username == "wsuser"
-    assert config.proxy_password == "wspass"
-
-
-def test_build_transcript_api_uses_generic_proxy(monkeypatch) -> None:
-    captured = {}
-    monkeypatch.setattr(
-        "app.services.youtube.youtube_proxy_settings",
-        lambda: ("", "", "http://user:pass@host:8080"),
-    )
-    monkeypatch.setattr(
-        "youtube_transcript_api.YouTubeTranscriptApi",
-        lambda **kwargs: captured.setdefault("kwargs", kwargs) or object(),
-    )
-    youtube._build_transcript_api()
-    config = captured["kwargs"]["proxy_config"]
-    assert config.__class__.__name__ == "GenericProxyConfig"
-    assert config.http_url == "http://user:pass@host:8080"
-
-
-def test_build_transcript_api_no_proxy(monkeypatch) -> None:
-    captured = {}
-    monkeypatch.setattr("app.services.youtube.youtube_proxy_settings", lambda: ("", "", ""))
-    monkeypatch.setattr(
-        "youtube_transcript_api.YouTubeTranscriptApi",
-        lambda **kwargs: captured.setdefault("kwargs", kwargs) or object(),
-    )
-    youtube._build_transcript_api()
-    assert captured["kwargs"].get("proxy_config") is None
-
-
 def test_proxy_url_generic(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.youtube.youtube_proxy_settings",

@@ -2,7 +2,7 @@
 
 The pipeline entry point is a YouTube URL: the actual video file (needed for
 Demucs separation and muxing) is downloaded with yt-dlp, and the subtitles are
-read straight from YouTube with youtube-transcript-api.  Thai subtitles become
+read straight from YouTube with yt-dlp as well.  Thai subtitles become
 the dub text directly; other languages are sent to Gemini for translation.
 
 Neither call needs a YouTube API key.
@@ -64,29 +64,6 @@ def _proxy_url() -> str | None:
     if webshare_user and webshare_pass:
         return f"http://{webshare_user}:{webshare_pass}@res.webshare.io:80/"
     return None
-
-
-def _build_transcript_api():
-    """Build a YouTubeTranscriptApi, routing through a residential proxy when configured.
-
-    Mirrors the reference extractor's approach: Webshare residential credentials
-    take priority over a generic proxy URL; with neither set it connects directly.
-    """
-    from youtube_transcript_api import YouTubeTranscriptApi
-    from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
-
-    webshare_user, webshare_pass, generic_url = youtube_proxy_settings()
-    if webshare_user and webshare_pass:
-        return YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=webshare_user, proxy_password=webshare_pass
-            )
-        )
-    if generic_url:
-        return YouTubeTranscriptApi(
-            proxy_config=GenericProxyConfig(http_url=generic_url, https_url=generic_url)
-        )
-    return YouTubeTranscriptApi()
 
 
 def _base_options(target_dir: Path) -> dict:
