@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -117,17 +118,32 @@ def _download_attempts(target_dir: Path) -> list[dict]:
     ]
 
 
-def download_video(url: str, target_dir: Path) -> Path:
-    """Download the video as MP4 into ``target_dir`` and return its path."""
+def download_video(
+    url: str, target_dir: Path, progress: Callable[[float], None] | None = None
+) -> Path:
+    """Download the video as MP4 into ``target_dir`` and return its path.
+
+    ``progress`` is an optional callable ``(percent: float)`` invoked as the
+    download advances, letting the caller surface a progress bar.
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
     try:
         from yt_dlp import YoutubeDL
     except ImportError as exc:
         raise YouTubeError("ยังไม่ได้ติดตั้ง yt-dlp") from exc
 
+    def hook(data: dict) -> None:
+        if progress is None or data.get("status") != "downloading":
+            return
+        total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+        downloaded = data.get("downloaded_bytes") or 0
+        if total:
+            progress(min(99.0, downloaded / total * 100.0))
+
     last_error: Exception | None = None
     for options in _download_attempts(target_dir):
         try:
+            options["progress_hooks"] = [hook]
             with YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=True)
             candidates = list(target_dir.glob("youtube.*"))

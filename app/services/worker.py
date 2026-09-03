@@ -184,7 +184,16 @@ class JobWorker:
         source.mkdir(parents=True, exist_ok=True)
 
         # 1. Download the actual video file (needed for Demucs and muxing).
-        video_path = download_video(url, source)
+        def _download_progress(percent: float) -> None:
+            # Map the download 0-100% onto the 2..10 progress band so the bar
+            # visibly moves without colliding with later stage values.
+            db.update_job(
+                job_id,
+                progress=round(2 + percent / 100 * 8, 1),
+                wait_reason=f"กำลังดาวน์โหลดวิดีโอ {percent:.0f}%",
+            )
+
+        video_path = download_video(url, source, progress=_download_progress)
         info = probe_media(video_path)
         if not info.has_video:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี video stream")
