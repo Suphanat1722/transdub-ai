@@ -194,5 +194,44 @@ def test_assemble_1305_cues_keeps_every_command_under_windows_limit(tmp_path, mo
 
     monkeypatch.setattr("app.services.audio.subprocess.run", fake_run)
     assemble(tmp_path, cues)
-    assert len(commands) == 23  # 21 stems + final WAV + MP3
+    # 1305 cues fit one 10-min segment: 21 part-stems (64 each) + 1 seg-mix
+    # (the segment's own final) + 1 master mix + 1 MP3 = 24.
+    assert len(commands) == 24
     assert max(len(subprocess.list2cmdline(command)) for command in commands) < 20_000
+
+
+def test_assemble_segments_and_speeds_whole_segment(tmp_path, monkeypatch):
+    # Two cues in segment 0 (0-10min) whose sum overruns their last subtitle
+    # end, and one cue in segment 1 (10-20min).  The assemble must split by
+    # segment and speed segment 0 as a whole instead of per-cue.
+    seg0_a = tmp_path / "s0a.wav"
+    write_pcm_wav(seg0_a, tone(3000))   # 3s
+    seg0_b = tmp_path / "s0b.wav"
+    write_pcm_wav(seg0_b, tone(3000))   # 3s
+    seg1 = tmp_path / "s1.wav"
+    write_pcm_wav(seg1, tone(1000))     # 1s
+
+    # Segment 0 lasts 0s..5000ms (subtitle end 5000), but 3s+3s audio placed
+    # back-to-back overruns it; segment 1 is 600_000..600_1000, fits.
+    cues = [
+        {"position": 1, "status": "completed", "audio_path": str(seg0_a),
+         "start_ms": 0, "end_ms": 2000, "final_duration_ms": 3000},
+        {"position": 2, "status": "completed", "audio_path": str(seg0_b),
+         "start_ms": 2500, "end_ms": 5000, "final_duration_ms": 3000},
+        {"position": 3, "status": "completed", "audio_path": str(seg1),
+         "start_ms": 600000, "end_ms": 601000, "final_duration_ms": 1000},
+    ]
+    wav, mp3, duration, timeline = assemble(tmp_path, cues, max_start_delay_ms=1000)
+    assert wav.is_file() and mp3.is_file()
+
+    seg_indexes = [item["segment_index"] for item in timeline]
+    assert seg_indexes == [0, 0, 1]
+    # Segment 0 was over and sped; its per-item segment_speed > 1.0.  Segment 1
+    # fits, so its speed is 1.0.
+    seg0_speeds = [item["segment_speed"] for item in timeline if item["segment_index"] == 0]
+    seg1_speeds = [item["segment_speed"] for item in timeline if item["segment_index"] == 1]
+    assert all(s > 1.0 for s in seg0_speeds)
+    assert all(s == 1.0 for s in seg1_speeds)
+    # Master is at least as long as the last subtitle end.
+    assert duration >= 601000
+    assert duration < 700000

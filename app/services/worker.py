@@ -14,17 +14,13 @@ from ..core.config import (
     CACHE_FORMAT_REVISION,
     EDGE_TTS_DEFAULT_VOICE,
     JOBS_DIR,
-    MAX_SPEED,
-    MAX_TTS_RATE,
     PIPELINE_REVISION,
-    RATE_STEP,
     data_relative,
     resolve_data_path,
 )
 from ..repositories import database as db
 from .audio import (
     assemble,
-    fit_before_next_start,
     wav_duration_ms,
     write_report,
 )
@@ -396,12 +392,11 @@ class JobWorker:
             )
 
     def _generate_cue(self, job: dict, cue: dict) -> None:
-        """Synthesize one cue on the Edge TTS voice and fit it into the timeline.
+        """Synthesize one cue on the Edge TTS voice at its natural rate.
 
-        Edge TTS rate is raised in steps until the clip fits its slot without
-        cutting any words.  If the highest rate still overruns, the natural
-        (full) clip is kept and flagged so the assembly stage can stop at
-        ``needs_review`` instead of silently truncating the last words.
+        The cue is stored at its intrinsic duration (``speed_factor=1.0``);
+        timing is handled later in ``audio.assemble``, which speeds each whole
+        time segment rather than fiddling with individual cues.
         """
         job_id = job["id"]
         inference_text = str(cue["text"])
@@ -415,21 +410,6 @@ class JobWorker:
         attempts = int(cue["attempts"]) + 1
         started = time.monotonic()
 
-        # Retrieve the slot this cue must fit into before synthesizing.
-        refreshed = db.get_job(job_id)
-        assert refreshed is not None
-        next_subtitle = next(
-            (item for item in refreshed["cues"] if item["position"] == cue["position"] + 1),
-            None,
-        )
-        available_ms = (
-            max(0, next_subtitle["start_ms"] - cue["start_ms"]) if next_subtitle else None
-        )
-        if available_ms is None:
-            video_end = int(refreshed.get("video_duration_ms") or 0)
-            available_ms = max(0, video_end - int(cue["start_ms"])) or None
-        reached_next = False
-
         db.update_cue(
             cue["id"],
             status="processing",
@@ -438,64 +418,34 @@ class JobWorker:
             error=None,
         )
         try:
-            # Iterate rate upward (base, +10, +20 ... +MAX) until the clip fits.
-            rate = base_rate
-            original_ms = 0
-            overrun = False
-            while rate <= MAX_TTS_RATE:
-                cache_key = hashlib.sha256(
-                    "\0".join(
-                        (CACHE_FORMAT_REVISION, voice, str(rate), inference_text, str(revision))
-                    ).encode()
-                ).hexdigest()
-                cached = db.cache_get(cache_key)
-                if cached:
-                    shutil.copy2(cached["path"], raw_path)
-                    original_ms = int(cached["duration_ms"])
-                else:
-                    original_ms = synth_cue(inference_text, voice, rate, raw_path)
-                    cache_path = CACHE_DIR / f"{cache_key}.wav"
-                    shutil.copy2(raw_path, cache_path)
-                    db.cache_put(cache_key, str(cache_path), original_ms, {})
-                db.update_cue(cue["id"], cache_key=cache_key)
-                if available_ms is None or original_ms <= available_ms:
-                    break
-                rate += RATE_STEP
+            cache_key = hashlib.sha256(
+                "\0".join(
+                    (CACHE_FORMAT_REVISION, voice, str(base_rate), inference_text, str(revision))
+                ).encode()
+            ).hexdigest()
+            cached = db.cache_get(cache_key)
+            if cached:
+                shutil.copy2(cached["path"], raw_path)
+                original_ms = int(cached["duration_ms"])
             else:
-                overrun = True  # hit the rate ceiling; keep the natural clip.
-
-            # Fit by speeding up only as much as needed (never trim tails,
-            # because re-synthesis already picked a rate that fits).  If the
-            # highest rate still overruns, the full clip is kept and flagged:
-            # assembly later shifts later cues, or stops at needs_review when
-            # the final cue overruns the video.
-            final_ms, speed_factor, reaches_next = fit_before_next_start(
-                raw_path, final_path, available_ms, max_speed=MAX_SPEED, trim_tail=False
-            )
-            reached_next = reaches_next
-
-            warnings = list(cue.get("warnings") or json.loads(cue.get("warnings_json", "[]")))
-            if overrun:
-                warnings.append(
-                    "เสียงยังยาวเกินช่องเวลาแม้เร่งสุดแล้ว ตรวจและย่อข้อความ หรือลดความยาวก่อนประกอบ"
-                )
-            elif reached_next:
-                warnings.append("เสียงยังชน cue ถัดไปหลังเร่งสูงสุด")
+                original_ms = synth_cue(inference_text, voice, base_rate, raw_path)
+                cache_path = CACHE_DIR / f"{cache_key}.wav"
+                shutil.copy2(raw_path, cache_path)
+                db.cache_put(cache_key, str(cache_path), original_ms, {})
+            db.update_cue(cue["id"], cache_key=cache_key)
+            shutil.copy2(raw_path, final_path)
             db.update_cue(
                 cue["id"],
                 status="completed",
                 audio_path=data_relative(final_path),
                 original_duration_ms=original_ms,
                 final_duration_ms=int(wav_duration_ms(final_path)),
-                speed_factor=speed_factor,
-                warnings_json=json.dumps(warnings, ensure_ascii=False),
+                speed_factor=1.0,
+                warnings_json=json.dumps(cue.get("warnings") or [], ensure_ascii=False),
                 generation_duration_ms=round((time.monotonic() - started) * 1000),
                 pipeline_revision=PIPELINE_REVISION,
                 error=None,
             )
-            # A full-length clip is kept; if a late cue overruns the video the
-            # assembly stage (plan_timeline + _assemble_dub) stops at
-            # needs_review instead of cutting words.
             raw_path.unlink(missing_ok=True)
         except Exception as exc:
             if attempts < 3:

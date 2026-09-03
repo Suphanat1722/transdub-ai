@@ -36,6 +36,11 @@ SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
 MAX_SPEED = 1.25
+# Segment the dub into fixed-duration windows and speed the whole segment to
+# fit its last subtitle end, instead of speeding each cue independently.  Set
+# to 0 to treat the whole video as a single segment.
+SEGMENT_SECONDS = 600
+MAX_SEGMENT_SPEED = 1.5
 CACHE_FORMAT_REVISION = "edge-tts-v1"
 CACHE_MAX_AGE_DAYS = 30
 CACHE_MAX_BYTES = 10 * 1024**3
