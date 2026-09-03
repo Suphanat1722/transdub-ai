@@ -21,6 +21,22 @@
 
     <section id="system-warning" class="warning" hidden></section>
 
+    <section class="card api-key-card" id="api-key-card" hidden>
+      <div class="card-head">
+        <h3>ตั้งค่า Gemini API key</h3>
+        <button id="api-key-toggle" class="secondary">เปิด</button>
+      </div>
+      <p class="muted-note">ใช้ Gemini แปลเป็นภาษาไทย ใส่ key จาก <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a> แล้วกดบันทึก</p>
+      <div class="api-key-box" hidden>
+        <input id="api-key-input" type="password" placeholder="AIza..." autocomplete="off">
+        <div class="api-key-actions">
+          <button id="api-key-save" class="primary">บันทึก</button>
+          <button id="api-key-cancel" class="secondary">ปิด</button>
+        </div>
+        <p class="muted-note" id="api-key-msg"></p>
+      </div>
+    </section>
+
     <div class="layout">
       <aside>
         <button id="new-job-tab" class="primary wide">＋ สร้างงานใหม่</button>

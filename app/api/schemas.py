@@ -63,3 +63,7 @@ class LocalSettings(BaseModel):
     max_start_delay_ms: int = Field(default=2000, ge=0, le=5000)
     voice: str = "th-TH-NiwatNeural"
     tts_rate: int = Field(default=0, ge=-50, le=50)
+
+
+class ApiKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=500)

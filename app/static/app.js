@@ -64,6 +64,12 @@ async function loadHealth() {
     if (!health.gemini_configured) issues.push("ยังไม่มี GEMINI_API_KEY");
     $("#system-warning").hidden = !issues.length;
     $("#system-warning").textContent = issues.join(" · ");
+    // Show the key card on the landing page when Gemini is not configured yet,
+    // exactly where the user notices the missing key in the warning.
+    if (!health.gemini_configured) {
+      const card = $("#api-key-card");
+      if (card && !$("#job-panel").classList.contains("visible")) card.hidden = false;
+    }
   } catch (error) { $("#health").textContent = "● เชื่อมต่อ backend ไม่ได้"; }
 }
 
@@ -480,6 +486,33 @@ $("#pick-folder-btn").onclick = async () => {
     const res = await api("/api/jobs/pick-folder", { method: "POST" });
     if (res && res.path) $("#output-dir").value = res.path;
   } catch (error) { toast(error.message, true); }
+};
+
+$("#api-key-toggle").onclick = () => {
+  const box = $("#api-key-box");
+  box.hidden = !box.hidden;
+  $("#api-key-toggle").textContent = box.hidden ? "เปิด" : "ซ่อน";
+  if (!box.hidden) $("#api-key-input").focus();
+};
+$("#api-key-cancel").onclick = () => {
+  $("#api-key-box").hidden = true;
+  $("#api-key-toggle").textContent = "เปิด";
+  $("#api-key-msg").textContent = "";
+};
+$("#api-key-save").onclick = async () => {
+  const value = $("#api-key-input").value.trim();
+  if (!value) { $("#api-key-msg").textContent = "กรุณาใส่ API key"; return; }
+  $("#api-key-msg").textContent = "กำลังบันทึก...";
+  try {
+    await api("/api/settings/local/api-key", {
+      method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ api_key: value }),
+    });
+    $("#api-key-msg").textContent = "บันทึกแล้ว ✓";
+    $("#api-key-box").hidden = true;
+    $("#api-key-toggle").textContent = "เปิด";
+    $("#api-key-input").value = "";
+    await loadHealth();
+  } catch (error) { $("#api-key-msg").textContent = error.message; }
 };
 
 await Promise.all([loadHealth(), loadVoices(), loadJobs()]);

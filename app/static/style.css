@@ -25,3 +25,4 @@
 .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0 18px}.settings-grid .wide{grid-column:1/-1}
 .muted-note{color:var(--muted);font-size:12px;margin:10px 0 0}
 .t-read{color:var(--muted);font-variant-numeric:tabular-nums}
+.api-key-card{max-width:640px;margin:0 auto 22px}.api-key-box{display:grid;gap:12px;margin-top:12px}.api-key-actions{display:flex;gap:10px}.api-key-actions .primary{flex:1}.api-key-card a{color:var(--green)}
