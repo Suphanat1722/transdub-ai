@@ -40,6 +40,29 @@ def test_detects_legacy_encoding():
     assert parsed.cues[0].text == "café"
 
 
+def test_lenient_skips_empty_caption_blocks():
+    # Auto-generated on-YouTube captions can contain a caption block with only a
+    # timecode and no visible text.  Lenient mode skips those instead of failing
+    # the whole download.
+    raw = (
+        "1\n00:00:00,000 --> 00:00:01,000\nสวัสดี\n"
+        "2\n00:00:02,000 --> 00:00:03,000\n"
+        "3\n00:00:04,000 --> 00:00:05,000\nยินดีต้อนรับ"
+    ).encode()
+    parsed = parse_srt(raw, lenient=True)
+    assert len(parsed.cues) == 2
+    assert [cue.text for cue in parsed.cues] == ["สวัสดี", "ยินดีต้อนรับ"]
+
+
+def test_strict_rejects_empty_caption_block():
+    raw = (
+        "1\n00:00:00,000 --> 00:00:01,000\nสวัสดี\n"
+        "2\n00:00:02,000 --> 00:00:03,000\n"
+    ).encode()
+    with pytest.raises(SrtValidationError):
+        parse_srt(raw)
+
+
 def test_rolled_srt_without_blank_lines_splits_into_separate_cues():
     # Many tools export "rolled" SRT with no blank line between cues; the parser
     # must still treat each timecode as the start of a new cue instead of

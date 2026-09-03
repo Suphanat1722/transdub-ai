@@ -199,7 +199,7 @@ class JobWorker:
         # 2. Pull the available subtitle from YouTube.
         srt_text, language = fetch_subtitle(url)
         try:
-            parsed = parse_srt(srt_text.encode("utf-8"))
+            parsed = parse_srt(srt_text.encode("utf-8"), lenient=True)
         except SrtValidationError as exc:
             raise YouTubeError(f"อ่านคำบรรยายจาก YouTube ไม่สำเร็จ: {exc}") from exc
         cues = [

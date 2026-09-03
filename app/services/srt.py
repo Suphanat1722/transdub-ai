@@ -60,7 +60,14 @@ def decode_srt(data: bytes) -> tuple[str, str]:
         return decoded, match.encoding
 
 
-def parse_srt(data: bytes) -> ParsedSrt:
+def parse_srt(data: bytes, lenient: bool = False) -> ParsedSrt:
+    """Parse an SRT byte string into cues.
+
+    ``lenient=True`` skips cue blocks that carry no spoken text (common in
+    auto-generated on-YouTube captions, where a block can be an empty caption)
+    instead of raising, while still flagging genuinely malformed cues.  Strict
+    mode (default) is used for user-uploaded SRT files.
+    """
     text, encoding = decode_srt(data)
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
@@ -134,7 +141,10 @@ def parse_srt(data: bytes) -> ParsedSrt:
             raise SrtValidationError(f"บล็อก {block_no}: มี control character ที่ไม่อนุญาต")
         spoken = html.unescape(TAG_RE.sub("", ASS_TAG_RE.sub("", spoken))).strip()
         if not spoken:
-            raise SrtValidationError(f"บล็อก {block_no}: ไม่มีข้อความ")
+            if not lenient:
+                raise SrtValidationError(f"บล็อก {block_no}: ไม่มีข้อความ")
+            global_warnings.append(f"Cue {source_index} ถูกข้ามเพราะไม่มีข้อความ")
+            continue
         cue_warnings: list[str] = []
         if start < previous_end:
             cue_warnings.append("ช่วงเวลาทับกับ cue ก่อนหน้า")
