@@ -18,10 +18,13 @@ from pathlib import Path
 
 from ..core.config import youtube_proxy_settings
 
-# Languages chosen directly as the final dub text (no Gemini translation).
+# Language chosen directly as the final dub text (no Gemini translation).
 THAI_LANGUAGE = "th"
-# Preferred subtitle language order; the first available one wins.
-PREFERRED_LANGUAGES = ("th", "en")
+# Last-resort fallback order when the video's original language cannot be
+# determined (English is the common original; Thai avoids a pointless Gemini
+# translation when no other track exists).  An explicit source_language and any
+# detected original language are always tried before these.
+FALLBACK_LANGUAGES = ("en", THAI_LANGUAGE)
 
 
 class YouTubeError(RuntimeError):
@@ -88,7 +91,7 @@ def _subtitle_options(outdir: Path) -> dict:
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": PREFERRED_LANGUAGES,
+        "subtitleslangs": FALLBACK_LANGUAGES,
         "subtitlesformat": "srt",
         "outtmpl": str(outdir / "sub.%(ext)s"),
     }
@@ -189,15 +192,88 @@ def _attempt_subtitle(outdir: Path, url: str, language: str) -> str | None:
     return text or None
 
 
-def fetch_subtitle(url: str) -> tuple[str, str]:
+def _detect_subtitle_languages(info: dict, source_language: str = "auto") -> tuple[str, ...]:
+    """Return subtitle language codes to try, best match first.
+
+    Order: the user-selected ``source_language`` if non-auto, then the video's
+    detected original language, then the fallbacks. ``info`` is a yt-dlp info
+    dict; ``automatic_captions`` and ``subtitles`` map language code -> tracks.
+    """
+    available = [code for code in set(info.get("automatic_captions") or {}) | set(info.get("subtitles") or {})]
+    if not available:
+        return FALLBACK_LANGUAGES
+
+    available_upper = {code.split("-")[0].upper(): code for code in available}
+
+    def exact_or_family(requested: str) -> str | None:
+        requested = requested.strip()
+        if not requested or requested.lower() == "auto":
+            return None
+        if requested in available:
+            return requested
+        base = requested.split("-")[0].upper()
+        return available_upper.get(base)
+
+    # The video's original spoken-language tags and the configured source language.
+    original = info.get("original_language") or info.get("language") or None
+    wanted: list[str] = []
+    if source_language and source_language.lower() != "auto":
+        wanted.append(source_language)
+    if original and original.lower() != "auto":
+        wanted.append(original)
+
+    ordered: list[str] = []
+    for code in wanted:
+        match = exact_or_family(code)
+        if match and match not in ordered:
+            ordered.append(match)
+    for code in FALLBACK_LANGUAGES:
+        match = exact_or_family(code)
+        if match and match not in ordered:
+            ordered.append(match)
+    # Any remaining available track as a last resort (prefer manual/uploader subs).
+    manual = set(info.get("subtitles") or {})
+    for code in available:
+        if code not in ordered and (code in manual or not ordered):
+            ordered.append(code)
+    return tuple(ordered)
+
+
+def _available_languages(url: str) -> dict:
+    """Return ``{"automatic_captions": {}, "subtitles": {}}`` for a video, or {} if unknown.
+
+    ``original_language``, ``language``, ``automatic_captions`` and ``subtitles``
+    let us pick the video's original language instead of defaulting to Thai.  Any
+    failure here is non-fatal: the caller falls back to FALLBACK_LANGUAGES.
+    """
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        return {}
+    options = {**_subtitle_options(Path(tempfile.mkdtemp(prefix="sub-")))}
+    options.pop("writesubtitles", None)
+    options.pop("writeautomaticsub", None)
+    options["skip_download"] = True
+    try:
+        with YoutubeDL(options) as downloader:
+            return downloader.extract_info(url, download=False) or {}
+    except Exception:
+        return {}
+
+
+def fetch_subtitle(url: str, source_language: str = "auto") -> tuple[str, str]:
     """Fetch an available subtitle for ``url`` as SRT text plus its language code.
 
     Uses yt-dlp (the same tool that downloads the video) because it reliably
     lists and fetches on-YouTube captions through the configured proxy, unlike
     youtube-transcript-api which can fail with a blank response ("no element
-    found") on some videos.  Thai is preferred, then English, then the first
-    available track.  Each language is requested separately to avoid dropping an
-    already-fetched track to a 429 on a later one.
+    found") on some videos.
+
+    The language is chosen to match the video's original language rather than
+    Thai: the user's ``source_language`` (if set) wins, then the original
+    language detected from the video, then English, then Thai, then any track.
+    Each language is requested separately to avoid dropping an already-fetched
+    track to a 429 on a later one.
     """
     if not extract_video_id(url):
         raise YouTubeError("ลิงก์ YouTube ไม่ถูกต้อง")
@@ -208,13 +284,16 @@ def fetch_subtitle(url: str) -> tuple[str, str]:
 
     outdir = Path(tempfile.mkdtemp(prefix="sub-"))
     try:
-        for language in PREFERRED_LANGUAGES:
+        languages = _detect_subtitle_languages(_available_languages(url), source_language)
+        if not languages:
+            languages = FALLBACK_LANGUAGES
+        for language in languages:
             try:
                 text = _attempt_subtitle(outdir, url, language)
             except Exception as exc:
                 message = str(exc)
                 if "IpBlocked" in message or "TooManyRequests" in message or "reload" in message:
-                    raise YouTubeError("YouTube บล็อก IP/จำกัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
+                    raise YouTubeError("YouTube บล็อก IP/จํากัดการเรียกชั่วคราว ลองอีกครั้งภายหลัง") from exc
                 continue
             if text:
                 return text, language

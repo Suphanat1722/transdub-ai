@@ -196,8 +196,9 @@ class JobWorker:
         if not info.has_audio:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี audio stream")
 
-        # 2. Pull the available subtitle from YouTube.
-        srt_text, language = fetch_subtitle(url)
+        # 2. Pull the available subtitle from YouTube, preferring the original
+        #    language (the job's source_language, or the video's detected one).
+        srt_text, language = fetch_subtitle(url, job.get("source_language") or "auto")
         try:
             parsed = parse_srt(srt_text.encode("utf-8"), lenient=True)
         except SrtValidationError as exc:

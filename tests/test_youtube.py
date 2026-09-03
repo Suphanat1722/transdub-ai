@@ -55,7 +55,9 @@ def _mock_download(monkeypatch, tmp_path: Path) -> None:
 
 def _mock_fetch_subtitle(monkeypatch, srt_text: str, language: str) -> None:
     monkeypatch.setattr(
-        worker_module, "fetch_subtitle", lambda url: (srt_text, language)
+        worker_module,
+        "fetch_subtitle",
+        lambda url, source_language="auto": (srt_text, language),
     )
 
 
@@ -89,6 +91,40 @@ def test_proxy_url_webshare_endpoint(monkeypatch) -> None:
 def test_proxy_url_none(monkeypatch) -> None:
     monkeypatch.setattr("app.services.youtube.youtube_proxy_settings", lambda: ("", "", ""))
     assert youtube._proxy_url() is None
+
+
+def test_detect_subtitle_languages_prefers_original_over_thai() -> None:
+    """An English video should fetch English subtitles, not Thai."""
+    info = {
+        "original_language": "en",
+        "subtitles": {"en": [{}], "th": [{}]},
+        "automatic_captions": {},
+    }
+    assert youtube._detect_subtitle_languages(info)[0] == "en"
+    # 'th' only appears as the rough last-resort, never first.
+    assert "en" in youtube._detect_subtitle_languages(info)
+
+
+def test_detect_subtitle_languages_honors_explicit_source_language() -> None:
+    info = {
+        "original_language": "en",
+        "subtitles": {"ja": [{}], "en": [{}]},
+        "automatic_captions": {},
+    }
+    # User-requested Japanese wins even though the video is originally English.
+    ordered = youtube._detect_subtitle_languages(info, source_language="ja")
+    assert ordered[0] == "ja"
+    assert "en" in ordered
+
+
+def test_detect_subtitle_languages_matches_family_code() -> None:
+    info = {"subtitles": {"en-US": [{}]}, "automatic_captions": {}}
+    ordered = youtube._detect_subtitle_languages(info)
+    assert ordered[0] == "en-US"
+
+
+def test_detect_subtitle_languages_empty_info_falls_back() -> None:
+    assert tuple(youtube._detect_subtitle_languages({})) == ("en", "th")
 
 
 def test_download_attempts_use_proxy_and_fallback_clients(monkeypatch, tmp_path: Path) -> None:

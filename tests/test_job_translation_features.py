@@ -45,7 +45,9 @@ def _mock_youtube(monkeypatch, tmp_path: Path, srt_text: str, language: str) -> 
             has_video=True, has_audio=True, duration=10.0, video_codec="h264"
         ),
     )
-    monkeypatch.setattr(worker_module, "fetch_subtitle", lambda url: (srt_text, language))
+    monkeypatch.setattr(
+        worker_module, "fetch_subtitle", lambda url, source_language="auto": (srt_text, language)
+    )
 
 
 def test_create_job_stores_translation_prompt(monkeypatch, tmp_path: Path) -> None:
