@@ -65,8 +65,11 @@ def parse_srt(data: bytes, lenient: bool = False) -> ParsedSrt:
 
     ``lenient=True`` skips cue blocks that carry no spoken text (common in
     auto-generated on-YouTube captions, where a block can be an empty caption)
-    instead of raising, while still flagging genuinely malformed cues.  Strict
-    mode (default) is used for user-uploaded SRT files.
+    instead of raising, while still flagging genuinely malformed cues.  Real
+    interval overlap between cues is likewise taken for granted in auto-captions
+    (each ASR window reaches into the next) and is normalized here by clamping
+    each cue's end to the start of the next cue.  Strict mode (default) is used
+    for user-uploaded SRT files.
     """
     text, encoding = decode_srt(data)
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -146,20 +149,34 @@ def parse_srt(data: bytes, lenient: bool = False) -> ParsedSrt:
             global_warnings.append(f"Cue {source_index} ถูกข้ามเพราะไม่มีข้อความ")
             continue
         cue_warnings: list[str] = []
-        if start < previous_end:
+        # YouTube auto-captions give each cue an end time that reaches past the
+        # next cue's start (the ASR word window overlaps the following word).
+        # That is native auto-caption timing, not a real subtitle defect, so in
+        # lenient mode it is not reported; after parsing we clamp it away (see
+        # below).  Strict mode (user-uploaded SRT) still flags genuine overlap.
+        if not lenient and start < previous_end:
             cue_warnings.append("ช่วงเวลาทับกับ cue ก่อนหน้า")
             global_warnings.append(f"Cue {source_index} มีช่วงเวลาทับกัน")
         if start < previous_start:
             cue_warnings.append("เวลาเริ่มเรียงย้อนหลัง")
             global_warnings.append(f"Cue {source_index} มีเวลาเริ่มย้อนหลัง")
         if time_line == 0:
-            cue_warnings.append("ไม่มีหมายเลข cue; ระบบกำหนดตำแหน่งให้อัตโนมัติ")
+            cue_warnings.append("ไม่มีหมายเลข cue; ระบบกําหนดตําแหน่งให้อัตโนมัติ")
         cues.append(ParsedCue(len(cues) + 1, source_index, start, end, spoken, cue_warnings))
         previous_end = max(previous_end, end)
         previous_start = start
 
     if not cues:
         raise SrtValidationError("ไม่พบ subtitle cue")
+    if lenient:
+        # Clamp each auto-caption's end so it finishes where the next cue starts,
+        # matching youtube-transcript-api output (which applies the same rule).
+        for i, cue in enumerate(cues):
+            if i + 1 >= len(cues):
+                break
+            next_start = cues[i + 1].start_ms
+            if next_start > cue.start_ms and cue.end_ms > next_start:
+                cue.end_ms = next_start
     if numeric_indices and numeric_indices != list(
         range(numeric_indices[0], numeric_indices[0] + len(numeric_indices))
     ):

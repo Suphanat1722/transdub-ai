@@ -54,6 +54,30 @@ def test_lenient_skips_empty_caption_blocks():
     assert [cue.text for cue in parsed.cues] == ["สวัสดี", "ยินดีต้อนรับ"]
 
 
+def test_lenient_clamps_auto_caption_end_to_next_start():
+    # YouTube auto-captions give each cue an end that reaches past the next cue's
+    # start.  Lenient mode treats this as native ASR timing: it clamps each
+    # cue's end to the next cue's start (matching youtube-transcript-api output)
+    # and does not report an overlap warning.
+    raw = (
+        b"1\n00:00:00,080 --> 00:00:04,400\nLast year, I had $100\n"
+        b"2\n00:00:02,320 --> 00:00:06,240\naccount, no previous\n"
+        b"3\n00:00:04,400 --> 00:00:08,160\nprogramming experience"
+    )
+    parsed = parse_srt(raw, lenient=True)
+    assert [cue.end_ms for cue in parsed.cues] == [2320, 4400, 8160]
+    assert all(not cue.warnings for cue in parsed.cues)
+
+
+def test_strict_still_flags_auto_caption_overlap():
+    raw = (
+        b"1\n00:00:00,080 --> 00:00:04,400\nLast year, I had $100\n"
+        b"2\n00:00:02,320 --> 00:00:06,240\naccount, no previous"
+    )
+    parsed = parse_srt(raw)
+    assert any("ทับ" in w for w in parsed.cues[1].warnings)
+
+
 def test_strict_rejects_empty_caption_block():
     raw = (
         "1\n00:00:00,000 --> 00:00:01,000\nสวัสดี\n"
