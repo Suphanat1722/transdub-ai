@@ -11,7 +11,7 @@ from .core.logging import configure_logging
 from .repositories import database
 from .services.worker import worker
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 
 @asynccontextmanager

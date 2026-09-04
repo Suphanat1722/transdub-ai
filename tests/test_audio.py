@@ -247,7 +247,8 @@ def test_assemble_groups_and_speeds_whole_group(tmp_path, monkeypatch):
     # Back-to-back inside the group: no remaining overlap.
     assert group0[1]["actual_start_ms"] >= group0[0]["actual_end_ms"]
     assert all(item["overlap_ms"] == 0 for item in timeline)
-    # Group 0 (7s back-to-back) sped to its 5s window; master reaches cue 3.
+    # Group 0 (7s back-to-back) needs 1.4x for its 5s window: capped at 1.25x
+    # with both cues sharing the uniform speed; master reaches cue 3.
     assert duration >= 601000
     assert duration < 700000
 
@@ -260,9 +261,9 @@ def test_assemble_single_overlong_cue_caps_group_speed(tmp_path):
          "start_ms": 0, "end_ms": 2000, "final_duration_ms": 4000},
     ]
     _, _, duration, timeline = assemble(tmp_path, cues)
-    assert timeline[0]["segment_speed"] == 1.5
+    assert timeline[0]["segment_speed"] == 1.25
     assert timeline[0]["group_capped"] is True
-    assert 2600 <= duration <= 2750
+    assert 3150 <= duration <= 3250
 
 
 def test_assemble_anchors_next_group_at_fitted_end_not_unsped_shadow(tmp_path):

@@ -276,6 +276,9 @@ def get_job(job_id: str, include_cues: bool = True) -> dict | None:
         job["counts"] = {r["status"]: r["count"] for r in counts}
         job["total_cues"] = sum(job["counts"].values())
         job["completed_cues"] = job["counts"].get("completed", 0)
+        job["total_source_cues"] = conn.execute(
+            "SELECT COUNT(*) FROM source_cues WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
         timing = conn.execute(
             "SELECT AVG(generation_duration_ms) average_ms FROM "
             "(SELECT generation_duration_ms FROM cues WHERE job_id=? AND generation_duration_ms IS NOT NULL "

@@ -14,6 +14,8 @@ JOBS_DIR = DATA_DIR / "jobs"
 IMPORTS_DIR = DATA_DIR / "imports"
 CACHE_DIR = DATA_DIR / "cache"
 MEDIA_CACHE_DIR = DATA_DIR / "media-cache"
+# Finished videos go here when the job has no custom output folder.
+OUTPUTS_DIR = DATA_DIR / "outputs"
 DB_PATH = DATA_DIR / "app.db"
 STATIC_DIR = ROOT / "app" / "static"
 
@@ -36,7 +38,7 @@ MAX_SPEED = 1.25
 # fit its last subtitle end, instead of speeding each cue independently.  Set
 # to 0 to treat the whole video as a single segment.
 SEGMENT_SECONDS = 600
-MAX_SEGMENT_SPEED = 1.5
+MAX_SEGMENT_SPEED = 1.25
 CACHE_FORMAT_REVISION = "edge-tts-v1"
 CACHE_MAX_AGE_DAYS = 30
 CACHE_MAX_BYTES = 10 * 1024**3
@@ -46,7 +48,7 @@ MAX_SUBPROCESS_COMMAND_CHARS = 20_000
 
 
 def ensure_directories() -> None:
-    for path in (DATA_DIR, JOBS_DIR, IMPORTS_DIR, CACHE_DIR, MEDIA_CACHE_DIR):
+    for path in (DATA_DIR, JOBS_DIR, IMPORTS_DIR, CACHE_DIR, MEDIA_CACHE_DIR, OUTPUTS_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 

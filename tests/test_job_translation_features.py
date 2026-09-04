@@ -29,13 +29,13 @@ def _setup(monkeypatch, tmp_path: Path) -> None:
 def _mock_youtube(monkeypatch, tmp_path: Path, srt_text: str, language: str) -> None:
     from types import SimpleNamespace
 
-    def fake_download(url: str, target_dir: Path, progress=None) -> Path:
+    def fake_download(url: str, target_dir: Path, progress=None) -> tuple[Path, str | None]:
         video = target_dir / "youtube.mp4"
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(b"video")
         if progress:
             progress(100.0)
-        return video
+        return video, "Some Clip Title"
 
     monkeypatch.setattr(worker_module, "download_video", fake_download)
     monkeypatch.setattr(

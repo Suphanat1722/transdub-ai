@@ -118,7 +118,11 @@ def _base_options(target_dir: Path) -> dict:
     """yt-dlp options shared across attempts: output, proxy, impersonation and quiet."""
     options = {
         "outtmpl": str(target_dir / "youtube.%(ext)s"),
-        "merge_output_format": "mp4",
+        # Merge to MKV so the best streams always survive: VP9/AV1 video or
+        # Opus audio cannot always merge into MP4, and forcing MP4 silently
+        # drops the download to a lower H.264-only quality.  The finished dub
+        # is still muxed to MP4 at the end.
+        "merge_output_format": "mkv",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -160,27 +164,42 @@ def _subtitle_options(outdir: Path) -> dict:
 def _download_attempts(target_dir: Path) -> list[dict]:
     """Candidate yt-dlp option sets, tried in order until one downloads a file.
 
-    A single client can lack a matching format (e.g. Android without audio-only
-    ``ba`` makes ``bv*+ba`` fail with "Requested format is not available"), so we
-    fall back across clients and looser format selectors.
+    Order matters for quality: the first success wins, and mobile clients
+    (Android/iOS) only expose reduced formats (typically H.264 up to 720p),
+    so they go last.  The TV client serves the full VP9/AV1 quality range and
+    resists the bot-check well; the default web client has everything but is
+    the one most often captcha-blocked.
     """
     base = _base_options(target_dir)
     return [
-        # Prefer separate best video + audio (merges), Android avoids the captcha.
-        {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["android"]}}},
+        # TV serves high-quality VP9/AV1 + Opus without the captcha in most cases.
+        {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["tv"]}}},
+        # Default web client has every format but is captcha-prone on some IPs.
+        {**base, "format": "bv*+ba/b"},
         # iOS exposes a wider format set (incl. audio-only) without the captcha.
         {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["ios"]}}},
-        # TV client serves combined high-quality mp4 (video+audio together).
-        {**base, "format": "best", "extractor_args": {"youtube": {"player_client": ["tv"]}}},
+        # Android avoids the captcha but only offers reduced (often 720p) formats.
+        {**base, "format": "bv*+ba/b", "extractor_args": {"youtube": {"player_client": ["android"]}}},
         # Last resort: any client, any format that includes audio.
         {**base, "format": "bestvideo+bestaudio/best"},
     ]
 
 
+def video_filename(title: str | None, ext: str, fallback: str) -> str:
+    """Build a Windows-safe job filename from a YouTube title."""
+    stripped = (title or "").strip()
+    if not stripped:
+        return f"{fallback}.{ext}"
+    return f"{_sanitize_filename(stripped)}.{ext}"
+
+
 def download_video(
     url: str, target_dir: Path, progress: Callable[[float], None] | None = None
-) -> Path:
-    """Download the video as MP4 into ``target_dir`` and return its path.
+) -> tuple[Path, str | None]:
+    """Download the best-quality video into ``target_dir``.
+
+    Returns ``(path, title)`` where title is the YouTube video title (or None
+    when unavailable) so callers can name the job after the clip.
 
     ``progress`` is an optional callable ``(percent: float)`` invoked as the
     download advances, letting the caller surface a progress bar.
@@ -204,18 +223,19 @@ def download_video(
         try:
             options["progress_hooks"] = [hook]
             with YoutubeDL(options) as downloader:
-                info = downloader.extract_info(url, download=True)
+                info = downloader.extract_info(url, download=True) or {}
             candidates = list(target_dir.glob("youtube.*"))
             if candidates:
                 target = candidates[0]
                 if not target.is_file():
                     # yt-dlp sometimes keeps the original extension after merging.
                     continue
-                ext = "mp4" if info.get("ext") == "mp4" else (info.get("ext") or "mp4")
+                ext = "mkv" if info.get("ext") == "mkv" else (info.get("ext") or "mkv")
                 intended = target_dir / f"youtube.{ext}"
                 if intended.exists() and intended != target:
                     target = intended
-                return target
+                title = info.get("title")
+                return target, str(title).strip() if title else None
         except Exception as exc:
             last_error = exc
             # A captcha/reload or format error on one client → try the next.

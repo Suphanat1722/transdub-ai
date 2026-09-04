@@ -35,13 +35,13 @@ def _setup(monkeypatch, tmp_path: Path) -> None:
 def _mock_download(monkeypatch, tmp_path: Path) -> None:
     from types import SimpleNamespace
 
-    def fake_download(url: str, target_dir: Path, progress=None) -> Path:
+    def fake_download(url: str, target_dir: Path, progress=None) -> tuple[Path, str | None]:
         video = target_dir / "youtube.mp4"
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(b"video")
         if progress:
             progress(100.0)
-        return video
+        return video, "Some Clip Title"
 
     monkeypatch.setattr(worker_module, "download_video", fake_download)
     monkeypatch.setattr(
@@ -59,6 +59,13 @@ def _mock_fetch_subtitle(monkeypatch, srt_text: str, language: str) -> None:
         "fetch_subtitle",
         lambda url, source_language="auto": (srt_text, language),
     )
+
+
+def test_video_filename_uses_title_and_falls_back() -> None:
+    assert youtube.video_filename("My Clip: EP.1?", "mkv", "fallback") == "My Clip_ EP.1_.mkv"
+    assert youtube.video_filename("  ", "mkv", "fallback") == "fallback.mkv"
+    assert youtube.video_filename(None, "mp4", "fallback") == "fallback.mp4"
+    assert len(youtube.video_filename("x" * 200, "mkv", "fallback")) <= 124
 
 
 def test_extract_video_id_variants() -> None:
@@ -139,8 +146,11 @@ def test_download_attempts_use_proxy_and_fallback_clients(monkeypatch, tmp_path:
         # Stream through a real Chrome TLS fingerprint to dodge the bot-check.
         # yt-dlp requires an ImpersonateTarget object, not a bare string.
         assert getattr(options.get("impersonate"), "client", None) == "chrome"
-    # The first attempt pins the Android player client (captcha-avoiding).
-    assert attempts[0]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
+        assert options.get("merge_output_format") == "mkv"
+    # The first attempt uses the TV client (full quality range); reduced
+    # mobile clients (Android) go last so a low-quality success never wins.
+    assert attempts[0]["extractor_args"] == {"youtube": {"player_client": ["tv"]}}
+    assert attempts[-2]["extractor_args"] == {"youtube": {"player_client": ["android"]}}
 
 
 def test_subtitle_attempt_options_impersonate(tmp_path: Path) -> None:
@@ -215,6 +225,7 @@ def test_resolve_youtube_language_sets_import_for_thai(monkeypatch, tmp_path: Pa
     # it hangs in "downloading" forever.
     assert job["status"] == "queued"
     assert job["source_path"] is not None
+    assert job["filename"] == "Some Clip Title.mp4"
     assert [c["text"] for c in job["cues"]] == ["สวัสดี", "ยินดีต้อนรับ"]
 
 

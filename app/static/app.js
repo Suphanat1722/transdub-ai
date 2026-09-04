@@ -289,8 +289,12 @@ function connectEvents(id, retryCount = 0) {
       state.current = JSON.parse(event.data);
       renderJob(); await loadJobs();
       if (!$("#logs-body").hidden) loadLogs();
-      if (state.layer === "translation" && previous && state.current.total_cues !== previous.total_cues) {
-        await loadCues();       // the translation layer was (re)built: re-render the page
+      // Reload the cue list whenever the visible layer gains (or loses) cues,
+      // so fresh subtitles/translations appear without a manual refresh.
+      const countOf = (job) => state.layer === "source" ? job?.total_source_cues : job?.total_cues;
+      if (previous && countOf(previous) !== countOf(state.current)) {
+        state.offset = 0;
+        await loadCues();       // the visible layer was (re)built: re-render the page
       } else {
         syncCueRows();          // same set of cues: patch status bits in place
       }
@@ -507,7 +511,11 @@ function renderArtifacts(items) {
 
 async function loadCues() {
   if (!state.current) return;
-  const data = await api(`/api/jobs/${state.current.id}/cues?layer=${state.layer}&offset=${state.offset}&limit=${state.limit}`);
+  let data = await api(`/api/jobs/${state.current.id}/cues?layer=${state.layer}&offset=${state.offset}&limit=${state.limit}`);
+  if (data.total > 0 && state.offset >= data.total) {
+    state.offset = 0;
+    data = await api(`/api/jobs/${state.current.id}/cues?layer=${state.layer}&offset=0&limit=${state.limit}`);
+  }
   state.cueTotal = data.total;
   $("#cue-list").innerHTML = data.items.length ? data.items.map((cue) => `
     <article class="cue" data-id="${cue.id}">
@@ -802,7 +810,7 @@ $("#pick-folder-btn").onclick = async () => {
 $("#check-folder-btn").onclick = async () => {
   const value = $("#output-dir").value.trim();
   const msg = $("#folder-msg");
-  if (!value) { msg.textContent = "ว่าง = เก็บไว้ในโฟลเดอร์งาน (ใช้ได้)"; return; }
+  if (!value) { msg.textContent = "ว่าง = โฟลเดอร์ Output กลาง (ใช้ได้)"; return; }
   try {
     const res = await api("/api/jobs/validate-folder", {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ path: value }),

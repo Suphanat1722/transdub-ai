@@ -15,6 +15,7 @@ def configure_temp_data(monkeypatch, root: Path) -> None:
         "IMPORTS_DIR": root / "imports",
         "LOG_DIR": root / "logs",
         "MEDIA_CACHE_DIR": root / "media-cache",
+        "OUTPUTS_DIR": root / "outputs",
     }
     for name, value in mapping.items():
         monkeypatch.setattr(config, name, value, raising=False)

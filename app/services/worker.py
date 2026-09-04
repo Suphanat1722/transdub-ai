@@ -14,6 +14,7 @@ from ..core.config import (
     CACHE_FORMAT_REVISION,
     EDGE_TTS_DEFAULT_VOICE,
     JOBS_DIR,
+    OUTPUTS_DIR,
     PIPELINE_REVISION,
     data_relative,
     resolve_data_path,
@@ -34,7 +35,7 @@ from .media import (
 )
 from .srt import SrtValidationError, parse_srt
 from .translation import QuotaWait, TranslationError, serialize_srt, translate
-from .youtube import YouTubeError, download_video, fetch_subtitle
+from .youtube import YouTubeError, download_video, fetch_subtitle, video_filename
 
 logger = logging.getLogger(__name__)
 
@@ -189,12 +190,16 @@ class JobWorker:
                 wait_reason=f"กำลังดาวน์โหลดวิดีโอ {percent:.0f}%",
             )
 
-        video_path = download_video(url, source, progress=_download_progress)
+        video_path, video_title = download_video(url, source, progress=_download_progress)
         info = probe_media(video_path)
         if not info.has_video:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี video stream")
         if not info.has_audio:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี audio stream")
+        # Name the job after the clip instead of a generic id.
+        job_filename = video_filename(
+            video_title, video_path.suffix.lstrip(".") or "mkv", f"youtube-{job_id[:8]}"
+        )
 
         # 2. Pull the available subtitle from YouTube, preferring the original
         #    language (the job's source_language, or the video's detected one).
@@ -228,7 +233,7 @@ class JobWorker:
                 progress=5,
                 mode="import",
                 source_path=data_relative(video_path),
-                filename=video_path.name,
+                filename=job_filename,
                 video_duration_ms=round(info.duration * 1000),
                 video_codec=info.video_codec,
                 wait_reason=None,
@@ -243,7 +248,7 @@ class JobWorker:
                 progress=5,
                 mode="import_pending",
                 source_path=data_relative(video_path),
-                filename=video_path.name,
+                filename=job_filename,
                 video_duration_ms=round(info.duration * 1000),
                 video_codec=info.video_codec,
                 wait_reason=None,
@@ -568,7 +573,7 @@ class JobWorker:
             raise MediaError("ความยาววิดีโอผลลัพธ์ต่างจากต้นฉบับเกิน 0.15 วินาที")
 
         # Also copy the finished video to the user-chosen export folder, or to
-        # the folder containing the source video when none was chosen.
+        # the shared outputs folder (named after the clip) when none was chosen.
         exported_path: Path | None = None
         export_dir = job.get("output_dir")
         if export_dir:
@@ -579,13 +584,9 @@ class JobWorker:
                 exported_path = local_dir / f"{Path(job['filename']).stem}.th-dub.mp4"
                 shutil.copy2(output, exported_path)
         else:
-            try:
-                source_dir = resolve_data_path(job["source_path"]).parent
-            except ValueError:
-                source_dir = None
-            if source_dir and source_dir.is_dir():
-                exported_path = source_dir / f"{Path(job['filename']).stem}.th-dub.mp4"
-                shutil.copy2(output, exported_path)
+            OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+            exported_path = OUTPUTS_DIR / f"{Path(job['filename']).stem}.th-dub.mp4"
+            shutil.copy2(output, exported_path)
 
         db.put_artifact(job_id, "final_video", output, "video/mp4")
         shutil.rmtree(job_dir / "work", ignore_errors=True)
