@@ -19,6 +19,7 @@ from ..core.config import (
     OUTPUTS_DIR,
     PIPELINE_REVISION,
     TTS_SYNTH_WORKERS,
+    VIDEO_OVERSHOOT_TOLERANCE_MS,
     data_relative,
     resolve_data_path,
 )
@@ -26,6 +27,7 @@ from ..repositories import database as db
 from .audio import (
     assemble,
     trim_edge_silence,
+    wav_duration_ms,
     write_report,
 )
 from .edge_tts_synth import synth_cue
@@ -215,6 +217,12 @@ class JobWorker:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี video stream")
         if not info.has_audio:
             raise MediaError("วิดีโอที่ดาวน์โหลดไม่มี audio stream")
+        width = getattr(info, "width", None)
+        height = getattr(info, "height", None)
+        db.record_attempt(
+            job_id, "download", "ok",
+            message=f"ต้นฉบับ {width or '?'}x{height or '?'} {info.video_codec or ''}".strip(),
+        )
         # Name the job after the clip instead of a generic id.
         job_filename = video_filename(
             video_title, video_path.suffix.lstrip(".") or "mkv", f"youtube-{job_id[:8]}"
@@ -495,8 +503,8 @@ class JobWorker:
         """Synthesize one cue on the Edge TTS voice at its natural rate.
 
         The cue is stored at its intrinsic duration (``speed_factor=1.0``);
-        timing is handled later in ``audio.assemble``, which speeds each whole
-        time segment rather than fiddling with individual cues.
+        timing is handled later in ``audio.assemble``, which fits each
+        subtitle-contiguous speech group with a single uniform speed.
         """
         job_id = job["id"]
         inference_text = str(cue["text"])
@@ -613,7 +621,7 @@ class JobWorker:
             f"({capped_speed:.2f}x) เสียงส่วนเกินดันให้ช่วงถัดไปเริ่มช้าลง"
             for positions in capped_groups.values()
         ]
-        if latest_end > int(refreshed["video_duration_ms"]) + 20:
+        if latest_end > int(refreshed["video_duration_ms"]) + VIDEO_OVERSHOOT_TOLERANCE_MS:
             overflow = latest_end - int(refreshed["video_duration_ms"])
             problem_positions = [
                 str(item["cue"]["position"])
@@ -636,13 +644,21 @@ class JobWorker:
                 error=None,
             )
             return
+        auto_warnings = []
+        if latest_end > int(refreshed["video_duration_ms"]) + 20:
+            overflow = latest_end - int(refreshed["video_duration_ms"])
+            auto_warnings.append(
+                f"เสียงพากย์ยาวเกินวิดีโอ {overflow} ms; ต่อภาพนิ่งท้ายวิดีโอให้อัตโนมัติ"
+            )
         db.update_job(
             job_id,
             status="queued",
             stage="synthesized",
             progress=92,
             dub_audio_path=data_relative(dub_wav),
-            warnings_json=json.dumps([*base_warnings, *capped_warnings], ensure_ascii=False),
+            warnings_json=json.dumps(
+                [*base_warnings, *capped_warnings, *auto_warnings], ensure_ascii=False
+            ),
         )
 
     def _mux(self, job: dict) -> None:
@@ -650,17 +666,23 @@ class JobWorker:
         db.update_job(job_id, status="muxing", progress=94, error=None)
         job_dir = JOBS_DIR / job_id
         output = job_dir / "artifacts" / "final.th-dub.mp4"
+        video_ms = int(job["video_duration_ms"])
+        # The dub may legitimately run slightly past the video (subtitle timing
+        # slop that _assemble_dub already approved); target the longer of the
+        # two so the tail survives with a frozen last frame instead of failing.
+        dub_ms = wav_duration_ms(resolve_data_path(job["dub_audio_path"]))
+        target_ms = max(video_ms, dub_ms)
         copied = mix_output(
             resolve_data_path(job["source_path"]),
             resolve_data_path(job["background_path"]),
             resolve_data_path(job["dub_audio_path"]),
             output,
-            float(job["video_duration_ms"]) / 1000,
+            target_ms / 1000,
             float(job["background_volume"]),
             float(job["voice_volume"]),
         )
         info = probe_media(output)
-        if abs(info.duration * 1000 - int(job["video_duration_ms"])) > 150:
+        if abs(info.duration * 1000 - target_ms) > 150:
             output.unlink(missing_ok=True)
             raise MediaError("ความยาววิดีโอผลลัพธ์ต่างจากต้นฉบับเกิน 0.15 วินาที")
 

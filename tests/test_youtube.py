@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.api.jobs as jobs_api
@@ -269,3 +272,81 @@ def test_youtube_failure_marks_job_failed(monkeypatch, tmp_path: Path) -> None:
         worker._process_one(job_id)
     # The step set "downloading" before failing; the runner would mark "failed".
     assert db.get_job(job_id)["status"] == "downloading"
+
+
+def _make_clip(path: Path, width: int, height: int) -> None:
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "lavfi", "-i", f"color=c=blue:s={width}x{height}:r=25:d=1",
+         "-f", "lavfi", "-i", "sine=frequency=220:duration=1",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+         "-shortest", str(path)],
+        check=True,
+    )
+
+
+def _fake_youtube_dl(monkeypatch, heights: dict[str, Path]) -> list[str]:
+    """Serve canned clips per player client; record which clients were tried."""
+    import yt_dlp
+
+    tried: list[str] = []
+
+    class FakeDL:
+        def __init__(self, options):
+            self.params = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            client = self.params.get("extractor_args", {}).get("youtube", {}).get(
+                "player_client", ["default"])[0]
+            tried.append(client)
+            shutil.copy(heights[client], self.params["_target_dir"] / "youtube.mp4")
+            return {"ext": "mp4", "title": "Clip"}
+
+    def factory(options):
+        options["_target_dir"] = Path(options["outtmpl"]).parent
+        return FakeDL(options)
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", factory)
+    return tried
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is required")
+def test_download_gate_skips_low_for_high(monkeypatch, tmp_path: Path) -> None:
+    low, high = tmp_path / "low.mp4", tmp_path / "high.mp4"
+    _make_clip(low, 640, 360)
+    _make_clip(high, 1280, 720)
+    # tv yields 360p, the default web client yields 720p.
+    tried = _fake_youtube_dl(monkeypatch, {
+        "tv": low, "default": high, "ios": high, "android": low,
+    })
+    target = tmp_path / "dl"
+    target.mkdir()
+    path, title = youtube.download_video(URL, target)
+    from app.services.media import probe_media
+
+    assert probe_media(path).height == 720
+    assert title == "Clip"
+    assert tried[0] == "tv" and "default" in tried
+    assert not list(target.glob("candidate-*"))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is required")
+def test_download_gate_keeps_best_when_all_low(monkeypatch, tmp_path: Path) -> None:
+    low = tmp_path / "low.mp4"
+    _make_clip(low, 640, 360)
+    _fake_youtube_dl(monkeypatch, {
+        "tv": low, "default": low, "ios": low, "android": low,
+    })
+    target = tmp_path / "dl"
+    target.mkdir()
+    path, _title = youtube.download_video(URL, target)
+    from app.services.media import probe_media
+
+    # Natively low videos are not a failure: the best file is returned.
+    assert probe_media(path).height == 360

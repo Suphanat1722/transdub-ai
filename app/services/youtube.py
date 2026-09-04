@@ -16,7 +16,8 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from ..core.config import youtube_proxy_settings
+from ..core.config import DOWNLOAD_MIN_HEIGHT, youtube_proxy_settings
+from .media import probe_media
 
 # Language chosen directly as the final dub text (no Gemini translation).
 THAI_LANGUAGE = "th"
@@ -193,6 +194,19 @@ def video_filename(title: str | None, ext: str, fallback: str) -> str:
     return f"{_sanitize_filename(stripped)}.{ext}"
 
 
+def _probe_height(path: Path) -> int | None:
+    """Return the video height, or None when probing fails (never fatal here)."""
+    try:
+        return probe_media(path).height
+    except Exception:
+        return None
+
+
+def _info_title(info: dict) -> str | None:
+    title = info.get("title")
+    return str(title).strip() if title else None
+
+
 def download_video(
     url: str, target_dir: Path, progress: Callable[[float], None] | None = None
 ) -> tuple[Path, str | None]:
@@ -200,6 +214,11 @@ def download_video(
 
     Returns ``(path, title)`` where title is the YouTube video title (or None
     when unavailable) so callers can name the job after the clip.
+
+    Client quality order is only a guess, so every success is probed: the
+    first attempt at or above ``DOWNLOAD_MIN_HEIGHT`` wins immediately,
+    otherwise later clients are still tried and the tallest file found is
+    kept (some videos are natively low resolution — that is not a failure).
 
     ``progress`` is an optional callable ``(percent: float)`` invoked as the
     download advances, letting the caller surface a progress bar.
@@ -218,24 +237,34 @@ def download_video(
         if total:
             progress(min(99.0, downloaded / total * 100.0))
 
+    for stale in list(target_dir.glob("youtube.*")) + list(target_dir.glob("candidate-*")):
+        with suppress(OSError):
+            stale.unlink()
+    best: tuple[int, Path, str, dict] | None = None  # height, path, ext, info
     last_error: Exception | None = None
-    for options in _download_attempts(target_dir):
+    for index, options in enumerate(_download_attempts(target_dir)):
         try:
             options["progress_hooks"] = [hook]
             with YoutubeDL(options) as downloader:
                 info = downloader.extract_info(url, download=True) or {}
             candidates = list(target_dir.glob("youtube.*"))
-            if candidates:
-                target = candidates[0]
-                if not target.is_file():
-                    # yt-dlp sometimes keeps the original extension after merging.
-                    continue
-                ext = "mkv" if info.get("ext") == "mkv" else (info.get("ext") or "mkv")
-                intended = target_dir / f"youtube.{ext}"
-                if intended.exists() and intended != target:
-                    target = intended
-                title = info.get("title")
-                return target, str(title).strip() if title else None
+            if not candidates or not candidates[0].is_file():
+                # yt-dlp sometimes keeps the original extension after merging.
+                continue
+            found = candidates[0]
+            ext = str(info.get("ext") or found.suffix.lstrip(".") or "mkv")
+            height = _probe_height(found)
+            if height is not None and height >= DOWNLOAD_MIN_HEIGHT:
+                for leftover in target_dir.glob("candidate-*"):
+                    with suppress(OSError):
+                        leftover.unlink()
+                return found, _info_title(info)
+            kept = target_dir / f"candidate-{index}.{ext}"
+            with suppress(OSError):
+                kept.unlink()
+            found.rename(kept)
+            if best is None or (height or 0) > best[0]:
+                best = (height or 0, kept, ext, info)
         except Exception as exc:
             last_error = exc
             # A captcha/reload or format error on one client → try the next.
@@ -243,6 +272,18 @@ def download_video(
                 with suppress(OSError):
                     stale.unlink()
             continue
+    if best is not None:
+        _, kept, ext, info = best
+        final = target_dir / f"youtube.{ext}"
+        if kept != final:
+            with suppress(OSError):
+                final.unlink()
+            kept.rename(final)
+        for leftover in target_dir.glob("candidate-*"):
+            if leftover != final:
+                with suppress(OSError):
+                    leftover.unlink()
+        return final, _info_title(info)
     raise YouTubeError(f"ดาวน์โหลดวิดีโอจาก YouTube ไม่สำเร็จ: {last_error}")
 
 

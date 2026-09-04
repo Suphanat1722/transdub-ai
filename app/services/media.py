@@ -47,6 +47,8 @@ class MediaInfo:
     has_video: bool
     has_audio: bool
     video_codec: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 def _run(command: Sequence[str], *, error_prefix: str) -> subprocess.CompletedProcess[str]:
@@ -132,7 +134,7 @@ def probe_media(path: Path) -> MediaInfo:
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=codec_type,codec_name,duration",
+            "format=duration:stream=codec_type,codec_name,width,height,duration",
             "-of",
             "json",
             str(path),
@@ -160,6 +162,8 @@ def probe_media(path: Path) -> MediaInfo:
         has_video=video_stream is not None,
         has_audio=audio_stream is not None,
         video_codec=video_stream.get("codec_name") if video_stream else None,
+        width=video_stream.get("width") if video_stream else None,
+        height=video_stream.get("height") if video_stream else None,
     )
 
 

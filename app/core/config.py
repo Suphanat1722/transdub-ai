@@ -28,12 +28,19 @@ TRANSLATION_MODELS = tuple(
 )
 HOST = "127.0.0.1"
 PORT = int(os.getenv("PORT", "8765"))
+# Minimum acceptable download height in pixels.  Attempts yielding less keep
+# trying later clients, but the best file found is still returned rather than
+# failing (some videos are natively low resolution).
+DOWNLOAD_MIN_HEIGHT = 720
 SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
 # Cap for speeding a whole speech group to fit its subtitle window.
 GROUP_MAX_SPEED = 1.25
-# Floor for slowing a whole speech group to fill its subtitle window.
+# Dub overruns up to this far past the video end (usually subtitle timing
+# slop, not real content) are muxed with a frozen tail frame instead of
+# parking the job for review.  Larger overruns still need a human decision.
+VIDEO_OVERSHOOT_TOLERANCE_MS = 2000# Floor for slowing a whole speech group to fill its subtitle window.
 GROUP_MIN_SPEED = 0.8
 # Subtitle gap (ms) at or below which cues belong to one speech group and
 # share a single uniform fit speed.  Larger gaps are real pauses: kept as-is.

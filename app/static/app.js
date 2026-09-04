@@ -298,6 +298,10 @@ function connectEvents(id) {
   source.onmessage = async (event) => {
       const previous = state.current;
       state.current = withPreservedCues(previous, JSON.parse(event.data));
+      // Close synchronously for terminal jobs: the server already ended the
+      // stream, and deferring close past the awaits below lets a stray error
+      // win the race and flap the "reconnecting" message forever.
+      if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) source.close();
       renderJob(); await loadJobs();
       if (!$("#logs-body").hidden) loadLogs();
       // Reload the cue list whenever the visible layer gains (or loses) cues,
@@ -309,7 +313,6 @@ function connectEvents(id) {
       } else {
         syncCueRows();          // same set of cues: patch status bits in place
       }
-      if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) source.close();
     };
   source.onerror = () => {
     // Server restarts kill the stream; keep retrying forever (5s) instead of
@@ -318,7 +321,7 @@ function connectEvents(id) {
     source.close();
     if (state.current && state.current.id === id) {
       setTimeout(() => {
-        if (state.current && state.current.id === id && !["completed", "failed", "cancelled"].includes(state.current.status)) {
+        if (state.current && state.current.id === id && !["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) {
           connectEvents(id);
         }
       }, 5000);

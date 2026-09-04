@@ -233,15 +233,6 @@ def _mix_to_parts(
     return parts
 
 
-def singleton_parts(
-    inputs: list[tuple[Path, int]], work_dir: Path
-) -> list[tuple[Path, int]]:
-    """Mix isolated natural-rate cues into part stems for the master mix."""
-    if not inputs:
-        return []
-    return _mix_to_parts(inputs, work_dir, "iso")
-
-
 def build_speech_groups(
     timeline: list[dict], max_gap_ms: int = GROUP_CONTIGUITY_MS
 ) -> list[list[dict]]:
@@ -388,10 +379,10 @@ def assemble(
             latest_end_ms, max(item["actual_end_ms"] for item in group)
         )
 
-    # Mix isolated cues (batched) and fitted group stems into one raw master,
-    # then limit + pad/trim it to the final length.
+    # Mix isolated cues (batched with the group stems) and fitted group stems
+    # into one raw master, then limit + pad/trim it to the final length.
     raw_master = seg_dir / "master-raw.wav"
-    all_inputs = [(path, 0) for path, _ in singleton_parts(singleton_inputs, seg_dir)] + master_inputs
+    all_inputs = singleton_inputs + master_inputs
     _mix_many(all_inputs, raw_master, seg_dir, "master")
     final_end_ms = max(
         latest_end_ms,

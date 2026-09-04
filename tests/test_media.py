@@ -77,3 +77,22 @@ def test_mix_falls_back_to_h264_for_incompatible_video_codec(tmp_path: Path) -> 
 
     assert copied is False
     assert probe_media(output).video_codec == "h264"
+
+
+def test_mix_output_freezes_tail_when_dub_outruns_video(tmp_path: Path) -> None:
+    video = tmp_path / "video.mp4"
+    background = tmp_path / "background.wav"
+    voice = tmp_path / "voice.wav"
+    output = tmp_path / "output.mp4"
+    run_ffmpeg(
+        "-f", "lavfi", "-i", "color=c=red:s=160x90:r=24:d=1",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "1", str(video),
+    )
+    run_ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:duration=1.5", str(background))
+    run_ffmpeg("-f", "lavfi", "-i", "sine=frequency=880:duration=1.5", str(voice))
+
+    # Dub (1.5s) outruns the video (1s): the tail survives on a frozen frame
+    # instead of failing the duration check.
+    mix_output(video, background, voice, output, 1.5, 100, 100)
+    assert probe_media(output).duration == pytest.approx(1.5, abs=0.2)
