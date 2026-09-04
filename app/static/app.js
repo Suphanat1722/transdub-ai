@@ -238,6 +238,17 @@ function escapeHtml(value = "") {
   const span = document.createElement("span"); span.textContent = value; return span.innerHTML;
 }
 
+function withPreservedCues(previous, next) {
+  // Actions/SSE ตอบกลับแบบไม่มี cues (include_cues=False) ถ้าเขียนทับดื้อ ๆ
+  // state.current.cues จะหาย ทำให้กล่องยืนยันแก้ต้นฉบับไม่ขึ้นและปุ่มฟัง
+  // ไม่อัปเดต — คงของเดิมไว้เมื่อ payload ใหม่ไม่มีมา
+  if (next && previous) {
+    if (next.cues === undefined) next.cues = previous.cues;
+    if (next.source_cues === undefined) next.source_cues = previous.source_cues;
+  }
+  return next;
+}
+
 function showCreate() {
   if (state.events) state.events.close();
   state.current = null;
@@ -286,7 +297,7 @@ function connectEvents(id, retryCount = 0) {
   state.events = source;
   source.onmessage = async (event) => {
       const previous = state.current;
-      state.current = JSON.parse(event.data);
+      state.current = withPreservedCues(previous, JSON.parse(event.data));
       renderJob(); await loadJobs();
       if (!$("#logs-body").hidden) loadLogs();
       // Reload the cue list whenever the visible layer gains (or loses) cues,
@@ -370,9 +381,9 @@ function renderTranslationTools(job) {
 async function savePrompt() {
   const value = $("#translation-prompt").value;
   try {
-    state.current = await api(`/api/jobs/${state.current.id}/translation-prompt`, {
+    state.current = withPreservedCues(state.current, await api(`/api/jobs/${state.current.id}/translation-prompt`, {
       method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ prompt: value }),
-    });
+    }));
     toast("บันทึก prompt แล้ว");
   } catch (error) { toast(error.message, true); }
 }
@@ -426,9 +437,9 @@ async function saveJobSettings() {
     if (!ok) return;
   }
   try {
-    state.current = await api(`/api/jobs/${job.id}`, {
+    state.current = withPreservedCues(state.current, await api(`/api/jobs/${job.id}`, {
       method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
-    });
+    }));
     toast("บันทึกการตั้งค่าแล้ว");
     renderJob(); renderJobList();
     if (body.voice || body.tts_rate !== undefined) syncCueRows();
@@ -484,7 +495,7 @@ async function runAction(action) {
     return;
   }
   try {
-    state.current = await api(`/api/jobs/${state.current.id}/actions`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action }) });
+    state.current = withPreservedCues(state.current, await api(`/api/jobs/${state.current.id}/actions`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action }) }));
     renderJob(); await loadJobs();
     if (["resume", "retry", "approve_transcript", "approve_translation", "remux", "reassemble", "retranslate"].includes(action)) openJob(state.current.id);
   } catch (error) { toast(error.message, true); }

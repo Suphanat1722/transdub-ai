@@ -101,6 +101,7 @@ def test_affected_chunk_helper_and_static_wizard(monkeypatch, tmp_path: Path) ->
     js = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
     assert "confirmModal" in js
     assert "saveAllCues" in js
+    assert "withPreservedCues" in js
     assert "affected" not in js  # helper stays backend-only
     assert "/queue" in js
 
