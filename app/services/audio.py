@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import subprocess
 import wave
 from pathlib import Path
@@ -9,7 +10,9 @@ from pathlib import Path
 from ..core.config import (
     ASSEMBLY_STEM_SIZE,
     CHANNELS,
-    MAX_SEGMENT_SPEED,
+    GROUP_CONTIGUITY_MS,
+    GROUP_MAX_SPEED,
+    GROUP_MIN_SPEED,
     MAX_SUBPROCESS_COMMAND_CHARS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
@@ -36,6 +39,54 @@ def _filter_complex_args(filter_graph: str, filter_file: Path) -> list[str]:
 def wav_duration_ms(path: Path) -> int:
     with wave.open(str(path), "rb") as source:
         return round(source.getnframes() * 1000 / source.getframerate())
+
+
+def trim_edge_silence(
+    path: Path, *, threshold: float = 250.0, window_ms: int = 20, keep_ms: int = 120
+) -> int:
+    """Strip Edge TTS leading/trailing padding in place; return duration ms.
+
+    Every synthesized cue carries ~0.2s of leading and ~0.9s of trailing
+    near-silence from the TTS MP3.  Left in place it reads as a dead-air gap
+    after every sentence and inflates durations into spurious group speedups.
+    Trims to the first/last window at/above ``threshold`` RMS, keeping
+    ``keep_ms`` of natural padding each side.  Files already tight or fully
+    silent are left untouched.  Idempotent: re-running barely changes anything.
+    """
+    with wave.open(str(path), "rb") as source:
+        params = source.getparams()
+        frames = source.readframes(params.nframes)
+    if params.nchannels not in (1, 2) or params.sampwidth != 2 or not frames:
+        return wav_duration_ms(path)
+    samples = struct.unpack("<" + "h" * (len(frames) // 2), frames)
+    if params.nchannels == 2:
+        samples = samples[::2]
+    frame_rate = params.framerate
+    window = max(1, int(frame_rate * window_ms / 1000))
+    keep = int(frame_rate * keep_ms / 1000)
+
+    def loud(index: int) -> bool:
+        chunk = samples[index:index + window]
+        return (sum(s * s for s in chunk) / len(chunk)) ** 0.5 >= threshold
+
+    first = next((i for i in range(0, len(samples), window) if loud(i)), None)
+    if first is None:
+        return wav_duration_ms(path)
+    last_end = next(
+        (i for i in range(len(samples), 0, -window) if loud(max(0, i - window))),
+        len(samples),
+    )
+    start = max(0, first - keep)
+    end = min(len(samples), last_end + keep)
+    if start <= 0 and end >= len(samples):
+        return wav_duration_ms(path)
+    trimmed = samples[start:end]
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(frame_rate)
+        output.writeframes(struct.pack("<" + "h" * len(trimmed), *trimmed))
+    return wav_duration_ms(path)
 
 
 def write_pcm_wav(path: Path, pcm: bytes) -> int:
@@ -138,18 +189,15 @@ def _mix_many(inputs: list[tuple[Path, int]], output: Path, work_dir: Path, pref
     _mix_batch(parts, output, work_dir / f"{prefix}-final-filter.txt")
 
 
-def _speedup_segment(source: Path, target: Path, target_ms: int, source_duration_ms: int) -> float:
-    """Speed a whole segment so it ends at ``target_ms`` from its start (origin=0).
+def _fit_segment(source: Path, target: Path, speed: float) -> float:
+    """Apply one uniform atempo factor to a group stem (or copy at 1.0).
 
-    ``source_duration_ms`` is provided by the caller (from the timeline) because
-    the raw segment stores float audio that ``wave`` cannot read directly.
-    Returns the applied speed factor (1.0 when already short enough).  Caps at
-    ``MAX_SEGMENT_SPEED``; if still over, keeps the sped clip (no truncation).
+    ``speed`` is already clamped to ``[GROUP_MIN_SPEED, GROUP_MAX_SPEED``];
+    returns the applied speed.
     """
-    if target_ms <= 0 or source_duration_ms <= target_ms:
+    if speed == 1.0:
         shutil.copy2(source, target)
         return 1.0
-    speed = min(source_duration_ms / target_ms, MAX_SEGMENT_SPEED)
     binary = ffmpeg_path()
     if not binary:
         raise AudioError("ไม่พบ FFmpeg ใน PATH")
@@ -160,7 +208,7 @@ def _speedup_segment(source: Path, target: Path, target_ms: int, source_duration
             "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
             "-c:a", "pcm_f32le", str(target),
         ],
-        "FFmpeg เร่งความเร็วทั้งช่วงไม่สําเร็จ",
+        "FFmpeg ปรับความเร็วทั้งช่วงไม่สำเร็จ",
     )
     return speed
 
@@ -194,36 +242,45 @@ def singleton_parts(
     return _mix_to_parts(inputs, work_dir, "iso")
 
 
-def build_overlap_groups(timeline: list[dict]) -> list[list[dict]]:
-    """Partition placed cues into overlap-chained groups.
+def build_speech_groups(
+    timeline: list[dict], max_gap_ms: int = GROUP_CONTIGUITY_MS
+) -> list[list[dict]]:
+    """Partition placed cues into subtitle-contiguous speech groups.
 
-    A new group starts wherever a cue begins at or after the previous cue's
-    end (a real gap or exact back-to-back).  Cues whose audio runs into the
-    next cue stay in one group so the group can be fitted with a single
-    uniform speed instead of speeding each cue differently.
+    A new group starts wherever the next cue's requested start lies more than
+    ``max_gap_ms`` after the previous cue's subtitle end — i.e. where the
+    original has a real pause worth preserving.  Everything inside one group
+    shares a single uniform fit speed (faster when over, slower when under),
+    so speech pace never changes mid-run and pauses are never dragged over.
     """
     groups: list[list[dict]] = []
     for item in timeline:
-        if groups and item["actual_start_ms"] < groups[-1][-1]["actual_end_ms"]:
-            groups[-1].append(item)
-        else:
-            groups.append([item])
+        if groups:
+            previous = groups[-1][-1]
+            gap_ms = item["requested_start_ms"] - int(
+                previous["cue"].get("end_ms", previous["actual_end_ms"])
+            )
+            if gap_ms <= max_gap_ms:
+                groups[-1].append(item)
+                continue
+        groups.append([item])
     return groups
 
 
 def assemble(
     job_dir: Path, cues: list[dict], max_start_delay_ms: int = 1000, output_dir: Path | None = None
 ) -> tuple[Path, Path, int, list[dict]]:
-    """Assemble all cue audio into a dub master without overlaps.
+    """Assemble all cue audio into a dub master without overlaps or dead air.
 
-    Cues chained by overlap form a group: inside the group cues are placed
-    strictly back-to-back, then the whole group mix is sped with a single
-    ``atempo`` (capped at ``MAX_SEGMENT_SPEED``) to fit the group's last
-    subtitle end.  Every cue in the group therefore shares one speaking rate
-    instead of each cue running at its own speed.  Isolated cues keep their
-    natural rate and go straight to the master mix.  Returns
-    ``(wav, mp3, duration_ms, timeline)``; per-cue ``segment_index`` /
-    ``segment_speed`` now describe the overlap group.
+    Cues whose subtitles run contiguously form a speech group: inside the
+    group cues are placed strictly back-to-back, then the whole group mix is
+    fitted with a single ``atempo`` — sped when over its window, slowed when
+    under — clamped to ``[GROUP_MIN_SPEED, GROUP_MAX_SPEED]``.  Every cue in
+    the group therefore shares one speaking rate instead of each cue running
+    at its own speed, and real pauses between groups are preserved untouched.
+    Isolated exact-fit cues keep their natural rate straight to the master.
+    Returns ``(wav, mp3, duration_ms, timeline)``; per-cue ``segment_index`` /
+    ``segment_speed`` describe the speech group.
     """
     binary = ffmpeg_path()
     if not binary:
@@ -252,9 +309,9 @@ def assemble(
     singleton_inputs: list[tuple[Path, int]] = []
     latest_end_ms = 0
 
-    for group_index, group in enumerate(build_overlap_groups(timeline)):
+    for group_index, group in enumerate(build_speech_groups(timeline)):
         # Anchor the group at its requested start or at the previous group's
-        # *fitted* end, whichever is later.  Anchoring at the unsped end (or
+        # fitted end, whichever is later.  Anchoring at the unsped end (or
         # keeping the capped planning delay) leaves a silence gap whenever an
         # earlier group was sped up, and the inflated delay shrinks this
         # group's target window into a spurious over-speed + warning.
@@ -263,7 +320,8 @@ def assemble(
         for item in group:
             item["actual_start_ms"] += shift
             item["actual_end_ms"] += shift
-        # Lay cues strictly back-to-back so nothing inside the group overlaps.
+        # Lay cues strictly back-to-back: overlaps and shortfalls alike are
+        # absorbed by the group's single uniform speed below.
         for previous, current in zip(group, group[1:], strict=False):
             if current["actual_start_ms"] < previous["actual_end_ms"]:
                 delta = previous["actual_end_ms"] - current["actual_start_ms"]
@@ -277,8 +335,14 @@ def assemble(
             int(item["cue"].get("end_ms", item["actual_end_ms"])) for item in group
         )
         span_ms, target_ms = span_end_ms - span_start_ms, target_end_ms - span_start_ms
-        required_speed = span_ms / target_ms if target_ms > 0 and span_ms > target_ms else 1.0
-        capped = required_speed > MAX_SEGMENT_SPEED
+        if target_ms <= 0:
+            speed, capped = 1.0, False
+        else:
+            required = span_ms / target_ms
+            capped = required > GROUP_MAX_SPEED
+            speed = min(max(required, GROUP_MIN_SPEED), GROUP_MAX_SPEED)
+            if abs(speed - 1.0) < 0.01:
+                speed = 1.0
         for item in group:
             item["segment_index"] = group_index
             item["delay_ms"] = item["actual_start_ms"] - item["requested_start_ms"]
@@ -286,8 +350,8 @@ def assemble(
             item["group_capped"] = capped
             item["group_overrun_ms"] = span_ms - target_ms if capped else 0
 
-        if len(group) == 1 and required_speed <= 1.0:
-            # Isolated cue at natural rate: straight to the master mix.
+        if len(group) == 1 and speed == 1.0:
+            # Isolated exact-fit cue at natural rate: straight to the master mix.
             item = group[0]
             item["segment_speed"] = 1.0
             singleton_inputs.append(
@@ -307,7 +371,7 @@ def assemble(
             f"group-{group_index:03d}",
         )
         fitted_group = seg_dir / f"group-{group_index:03d}.wav"
-        speed = _speedup_segment(raw_group, fitted_group, target_ms, span_ms)
+        speed = _fit_segment(raw_group, fitted_group, speed)
         # Rewrite placements to the fitted (post-speedup) positions so the
         # report, the next group's anchor and the video-overrun gate all see
         # where speech really lands instead of the unsped shadow.

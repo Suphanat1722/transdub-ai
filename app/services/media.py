@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,25 @@ class MediaError(RuntimeError):
 
 class SeparationCancelled(RuntimeError):
     """Raised when pause/cancel arrives while Demucs is running."""
+
+
+def parse_demucs_progress(log_text: str) -> float | None:
+    """Extract the latest Demucs tqdm percentage (0-100) from log text.
+
+    Demucs writes carriage-return-separated bars like
+    ``99%|████| 4375.8/4434.3 [08:40<00:08, 6.57seconds/s]``; the fraction is
+    the reliable signal, so the last ``done/total`` pair wins.  Returns None
+    when no progress figure is present yet (e.g. model loading).
+    """
+    pairs = re.findall(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", log_text.replace("\r", "\n"))
+    for done, total in reversed(pairs):
+        try:
+            total_value = float(total)
+        except ValueError:
+            continue
+        if total_value > 0:
+            return max(0.0, min(100.0, float(done) / total_value * 100))
+    return None
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -44,6 +44,15 @@ def create_app() -> FastAPI:
     application.include_router(voices.router)
     application.include_router(jobs.router)
     application.include_router(settings.router)
+
+    @application.get("/", response_class=HTMLResponse)
+    def index() -> str:
+        # Stamp the app version into asset URLs so browsers never mix a
+        # stale-cached index.html with a newer app.js (or vice versa), which
+        # silently kills the whole UI (missing element ids -> module dies).
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        return html.replace("__APP_VERSION__", APP_VERSION)
+
     application.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return application
 

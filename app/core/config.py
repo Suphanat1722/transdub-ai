@@ -31,8 +31,13 @@ PORT = int(os.getenv("PORT", "8765"))
 SAMPLE_RATE = 24_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
-# Cap for speeding a whole overlap group to fit its subtitle window.
-MAX_SEGMENT_SPEED = 1.25
+# Cap for speeding a whole speech group to fit its subtitle window.
+GROUP_MAX_SPEED = 1.25
+# Floor for slowing a whole speech group to fill its subtitle window.
+GROUP_MIN_SPEED = 0.8
+# Subtitle gap (ms) at or below which cues belong to one speech group and
+# share a single uniform fit speed.  Larger gaps are real pauses: kept as-is.
+GROUP_CONTIGUITY_MS = 400
 # Edge TTS cues synthesized concurrently per worker pass. Each cue is claimed
 # as `processing` before submission so restarts never double-synth one.
 TTS_SYNTH_WORKERS = 4

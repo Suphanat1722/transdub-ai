@@ -97,6 +97,7 @@ def test_affected_chunk_helper_and_static_wizard(monkeypatch, tmp_path: Path) ->
     assert 'id="confirm-modal"' in html
     assert 'id="logs-card"' in html
     assert 'name="separation_mode"' in html
+    assert "__APP_VERSION__" in html  # stamped per release by GET /
 
     js = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
     assert "confirmModal" in js
@@ -104,6 +105,17 @@ def test_affected_chunk_helper_and_static_wizard(monkeypatch, tmp_path: Path) ->
     assert "withPreservedCues" in js
     assert "affected" not in js  # helper stays backend-only
     assert "/queue" in js
+
+
+def test_index_pins_versioned_assets(monkeypatch, tmp_path: Path) -> None:
+    from app.main import APP_VERSION
+
+    client = _client(monkeypatch, tmp_path)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert f"/app.js?v={APP_VERSION}" in response.text
+    assert f"/style.css?v={APP_VERSION}" in response.text
+    assert "__APP_VERSION__" not in response.text
 
 
 def test_reassemble_action_requeues_finished_job(monkeypatch, tmp_path: Path) -> None:

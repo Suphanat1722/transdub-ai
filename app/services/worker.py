@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import shutil
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,7 +25,7 @@ from ..core.config import (
 from ..repositories import database as db
 from .audio import (
     assemble,
-    wav_duration_ms,
+    trim_edge_silence,
     write_report,
 )
 from .edge_tts_synth import synth_cue
@@ -34,6 +35,7 @@ from .media import (
     create_background_stem,
     extract_original_audio,
     mix_output,
+    parse_demucs_progress,
     probe_media,
 )
 from .srt import SrtValidationError, parse_srt
@@ -311,6 +313,16 @@ class JobWorker:
             minutes = int(elapsed_seconds // 60)
             # Creep the bar so a long CPU run reads as alive, not frozen.
             message = "กำลังแยกเสียงพูดด้วย Demucs"
+            progress_tail = (job_dir / "work" / "demucs" / "runner.log")
+            if progress_tail.is_file():
+                try:
+                    percent = parse_demucs_progress(
+                        progress_tail.read_bytes()[-4000:].decode("utf-8", errors="replace")
+                    )
+                except OSError:
+                    percent = None
+                if percent is not None:
+                    message += f" {percent:.0f}%"
             if minutes:
                 message += f" ({minutes} นาทีแล้ว — บน CPU อาจใช้เวลาหลายนาที)"
             if should_stop():
@@ -323,10 +335,8 @@ class JobWorker:
 
         try:
             if (job.get("separation_mode") or "demucs") == "fast":
-                # (fast path unchanged)
-                import shutil
-                import subprocess
-
+                # Fast mode: skip Demucs entirely, reuse the original mix as the
+                # background (user controls its level via background_volume at mux).
                 background.parent.mkdir(parents=True, exist_ok=True)
                 original = resolve_data_path(job["original_audio_path"])
                 result = subprocess.run(
@@ -524,12 +534,16 @@ class JobWorker:
                 db.cache_put(cache_key, str(cache_path), original_ms, {})
             db.update_cue(cue["id"], cache_key=cache_key)
             shutil.copy2(raw_path, final_path)
+            # Edge TTS pads every file with leading/trailing silence (~0.2s +
+            # ~0.9s); trim the placed copy so gaps and durations stay truthful.
+            # The cache keeps the untrimmed master; trimming is deterministic.
+            final_ms = trim_edge_silence(final_path)
             db.update_cue(
                 cue["id"],
                 status="completed",
                 audio_path=data_relative(final_path),
                 original_duration_ms=original_ms,
-                final_duration_ms=int(wav_duration_ms(final_path)),
+                final_duration_ms=final_ms,
                 speed_factor=1.0,
                 warnings_json=json.dumps(cue.get("warnings") or [], ensure_ascii=False),
                 generation_duration_ms=round((time.monotonic() - started) * 1000),
@@ -549,6 +563,18 @@ class JobWorker:
 
     def _assemble_dub(self, job: dict) -> None:
         job_id = job["id"]
+        # Older cue files still carry Edge TTS edge padding; trim them here so
+        # a plain reassemble also fixes the dead air (and the DB durations).
+        for cue in db.completed_cues(job_id):
+            try:
+                audio = resolve_data_path(cue["audio_path"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not audio.is_file():
+                continue
+            trimmed_ms = trim_edge_silence(audio)
+            if trimmed_ms != int(cue.get("final_duration_ms") or 0):
+                db.update_cue(cue["id"], final_duration_ms=trimmed_ms)
         refreshed = db.get_job(job_id)
         if not refreshed or refreshed["completed_cues"] != refreshed["total_cues"]:
             raise RuntimeError("ยังมี cue ที่สร้างเสียงไม่สำเร็จ")

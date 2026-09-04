@@ -572,6 +572,17 @@ def cue_counts(job_id: str) -> dict[str, int]:
     return {row["status"]: row["count"] for row in rows}
 
 
+def completed_cues(job_id: str) -> list[dict]:
+    """Return completed cues with audio (id/audio_path/final_duration_ms)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id,audio_path,final_duration_ms FROM cues "
+            "WHERE job_id=? AND status='completed' AND audio_path IS NOT NULL ORDER BY position",
+            (job_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_cues(
     job_id: str,
     *,

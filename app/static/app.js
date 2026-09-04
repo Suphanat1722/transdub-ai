@@ -291,7 +291,7 @@ async function openJob(id) {
   }
 }
 
-function connectEvents(id, retryCount = 0) {
+function connectEvents(id) {
   if (state.events) { try { state.events.close(); } catch { /* ignore */ } }
   const source = new EventSource(`/api/jobs/${id}/events`);
   state.events = source;
@@ -312,14 +312,16 @@ function connectEvents(id, retryCount = 0) {
       if (["completed", "failed", "cancelled", "needs_review"].includes(state.current.status)) source.close();
     };
   source.onerror = () => {
-    $("#job-message").textContent = "การเชื่อมต่อขาดหาย กำลังลองเชื่อมต่อใหม่… (กดรีเฟรชงานได้)";
+    // Server restarts kill the stream; keep retrying forever (5s) instead of
+    // going silent — the loop stops itself on terminal statuses or job switch.
+    $("#job-message").textContent = "การเชื่อมต่อขาดหาย กำลังลองเชื่อมต่อใหม่…";
     source.close();
-    if (retryCount < 10 && state.current && state.current.id === id) {
+    if (state.current && state.current.id === id) {
       setTimeout(() => {
         if (state.current && state.current.id === id && !["completed", "failed", "cancelled"].includes(state.current.status)) {
-          connectEvents(id, retryCount + 1);
+          connectEvents(id);
         }
-      }, 3000);
+      }, 5000);
     }
   };
 }
@@ -352,7 +354,14 @@ function renderJob() {
   const stageKey = job.stage === "synthesized" ? "synthesizing" : job.stage;
   const current = Math.max(0, order.indexOf(stageKey));
   $("#stage-track").innerHTML = order.map((stage, index) => `<span class="${index < current ? "done" : index === current ? "active" : ""}">${stageNames[stage]}</span>`).join("");
-  $("#job-warnings").innerHTML = (job.warnings || []).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
+  const warnings = job.warnings || [];
+  $("#job-warnings").innerHTML = warnings.length > 5
+    ? warnings.slice(0, 5).map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")
+      + `<p><button class="secondary small" id="warnings-more">แสดงทั้งหมด (${warnings.length})</button></p>`
+    : warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
+  $("#warnings-more") && ($("#warnings-more").onclick = () => {
+    $("#job-warnings").innerHTML = warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("");
+  });
   renderActions(job); renderArtifacts(job.artifacts || []); renderTranslationTools(job); renderJobSettings(job);
   if (job.status === "queued") loadQueue(job);
 }
