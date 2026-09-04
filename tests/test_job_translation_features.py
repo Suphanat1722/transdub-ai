@@ -96,7 +96,7 @@ def test_retranslate_resets_translation_and_queues(monkeypatch, tmp_path: Path) 
         assert resp.status_code == 202
         data = resp.json()
         assert data["status"] == "queued"
-        assert data["stage"] == "translated"
+        assert data["stage"] == "transcribed"
         assert data["translation_approved"] is False
         job = db.get_job("j1")
         assert job is not None and job["cues"] == []

@@ -89,7 +89,7 @@ def test_retranslate_clears_translation_and_requeues(monkeypatch, tmp_path: Path
     response = client.post("/api/jobs/job/actions", json={"action": "retranslate"})
     assert response.status_code == 202
     body = response.json()
-    assert body["stage"] == "translated"
+    assert body["stage"] == "transcribed"
     assert body["status"] == "queued"
     assert body["translation_approved"] is False
     _, total = db.list_cues("job", limit=10)
@@ -97,6 +97,24 @@ def test_retranslate_clears_translation_and_requeues(monkeypatch, tmp_path: Path
     assert db.translation_chunks("job") == []
     assert db.get_artifact("job", "translated_srt") is None
     assert db.get_artifact("job", "dub_wav") is None
+
+
+def test_retranslate_from_needs_review_clears_checkpoints(monkeypatch, tmp_path: Path) -> None:
+    client = make_client(monkeypatch, tmp_path)
+    seed_job("job", tmp_path)
+    # A job stuck past translation (e.g. overrun) must find its way back.
+    db.update_job("job", stage="synthesizing", status="needs_review", translation_approved=0)
+    checkpoints = tmp_path / "jobs" / "job" / "work" / "translation"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    (checkpoints / "job-chunk-0001.json").write_text("[]", encoding="utf-8")
+
+    response = client.post("/api/jobs/job/actions", json={"action": "retranslate"})
+    assert response.status_code == 202
+    body = response.json()
+    assert body["stage"] == "transcribed"
+    assert body["status"] == "queued"
+    assert list(checkpoints.glob("*.json")) == []
+    assert db.translation_chunks("job") == []
 
 
 def test_patch_voice_invalidates_generated_audio(monkeypatch, tmp_path: Path) -> None:

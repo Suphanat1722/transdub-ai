@@ -258,10 +258,18 @@ def action(job_id: str, request: JobActionRequest) -> dict:
         db.update_job(job_id, translation_approved=1, status="queued", wait_reason=None)
         worker.wake()
     elif selected == "retranslate":
-        if job["stage"] != "translated":
-            raise HTTPException(409, "งานยังไม่อยู่ที่ขั้นตรวจคําแปล")
+        # Restart translation from the (unchanged) transcript.  Allowed from
+        # any post-transcription stage so a needs_review/completed job with a
+        # broken translation (e.g. a runaway merge) has a way back without
+        # starting a new project.  Stage must go back to *transcribed* (not
+        # translated): with cues deleted there is nothing to synthesize yet.
+        if job["stage"] not in {"translated", "synthesizing", "synthesized", "completed"}:
+            raise HTTPException(409, "งานยังไม่อยู่ขั้นที่แปลใหม่ได้")
         job_dir = JOBS_DIR / job_id
         shutil.rmtree(job_dir / "cues", ignore_errors=True)
+        work_translation = job_dir / "work" / "translation"
+        for checkpoint in work_translation.glob("*.json") if work_translation.is_dir() else []:
+            checkpoint.unlink(missing_ok=True)
         with db.connect() as conn:
             conn.execute("DELETE FROM cues WHERE job_id=?", (job_id,))
             conn.execute("DELETE FROM translation_chunks WHERE job_id=?", (job_id,))
@@ -270,7 +278,7 @@ def action(job_id: str, request: JobActionRequest) -> dict:
         )
         db.update_job(
             job_id,
-            stage="translated",
+            stage="transcribed",
             status="queued",
             translation_approved=0,
             translated_srt_path=None,
@@ -278,7 +286,7 @@ def action(job_id: str, request: JobActionRequest) -> dict:
             output_video_path=None,
             wait_reason=None,
             error=None,
-            progress=47,
+            progress=45,
         )
         worker.wake()
     elif selected == "remux":

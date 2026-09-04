@@ -479,6 +479,7 @@ function renderActions(job) {
   if (["failed", "needs_review"].includes(job.status)) actions.push(["retry", "ลองต่อ"]);
   if (job.status === "reviewing_transcript") actions.push(["approve_transcript", "ยืนยัน transcript และแปลต่อ"]);
   if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"], ["retranslate", "แปลใหม่"]);
+  if (job.status === "needs_review") actions.push(["retranslate", "แปลใหม่"]);
   if (job.status === "completed" && job.artifacts?.some((item) => item.kind === "dub_wav")) actions.push(["remux", "มิกซ์ MP4 ใหม่"]);
   if (job.status === "completed") actions.push(["reassemble", "ประกอบเสียงใหม่"]);
   $("#actions").innerHTML = actions.map(([action, label], index) => {
