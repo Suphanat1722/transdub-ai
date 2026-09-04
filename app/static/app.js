@@ -456,6 +456,7 @@ function renderActions(job) {
   if (job.status === "reviewing_transcript") actions.push(["approve_transcript", "ยืนยัน transcript และแปลต่อ"]);
   if (job.status === "reviewing_translation") actions.push(["approve_translation", "ยืนยันคําแปลและสร้างเสียง"], ["retranslate", "แปลใหม่"]);
   if (job.status === "completed" && job.artifacts?.some((item) => item.kind === "dub_wav")) actions.push(["remux", "มิกซ์ MP4 ใหม่"]);
+  if (job.status === "completed") actions.push(["reassemble", "ประกอบเสียงใหม่"]);
   $("#actions").innerHTML = actions.map(([action, label], index) => {
     const cls = index === 0 ? "primary" : "secondary";
     return `<button data-action="${action}" class="${cls}">${label}</button>`;
@@ -481,7 +482,7 @@ async function runAction(action) {
   try {
     state.current = await api(`/api/jobs/${state.current.id}/actions`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ action }) });
     renderJob(); await loadJobs();
-    if (["resume", "retry", "approve_transcript", "approve_translation", "remux", "retranslate"].includes(action)) openJob(state.current.id);
+    if (["resume", "retry", "approve_transcript", "approve_translation", "remux", "reassemble", "retranslate"].includes(action)) openJob(state.current.id);
   } catch (error) { toast(error.message, true); }
 }
 

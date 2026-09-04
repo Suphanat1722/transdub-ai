@@ -18,6 +18,7 @@ class JobActionRequest(BaseModel):
             "approve_transcript",
             "approve_translation",
             "remux",
+            "reassemble",
             "regenerate_cue",
             "retranslate",
         }

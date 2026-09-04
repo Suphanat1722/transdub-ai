@@ -287,6 +287,26 @@ def action(job_id: str, request: JobActionRequest) -> dict:
         db.delete_artifacts(job_id, {"final_video"})
         db.update_job(job_id, stage="synthesized", status="queued", output_video_path=None)
         worker.wake()
+    elif selected == "reassemble":
+        # Re-run only the dub assembly with the current placer (no TTS calls:
+        # cue audio files are reused).  Used after placer fixes or tuning.
+        if job["stage"] not in {"synthesized", "completed"}:
+            raise HTTPException(409, "งานยังไม่มีเสียงพร้อมประกอบใหม่")
+        if not job["total_cues"]:
+            raise HTTPException(409, "งานนี้ยังไม่มี cue")
+        db.delete_artifacts(
+            job_id, {"dub_wav", "dub_mp3", "report_json", "report_csv", "final_video"}
+        )
+        db.update_job(
+            job_id,
+            stage="synthesizing",
+            status="queued",
+            dub_audio_path=None,
+            output_video_path=None,
+            wait_reason=None,
+            error=None,
+        )
+        worker.wake()
     elif selected == "regenerate_cue":
         cue_id = request.cue_id
         if cue_id is None:

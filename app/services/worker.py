@@ -501,6 +501,20 @@ class JobWorker:
             warning
             for warning in refreshed["warnings"]
             if not warning.startswith("เสียงพากย์ยาวเกินวิดีโอ")
+            and not warning.startswith("กลุ่ม cue")
+        ]
+        capped_groups: dict[int, list[int]] = {}
+        capped_speed = 0.0
+        for item in timeline:
+            if item.get("group_capped"):
+                capped_groups.setdefault(int(item.get("segment_index") or 0), []).append(
+                    int(item["cue"]["position"])
+                )
+                capped_speed = max(capped_speed, float(item.get("segment_speed") or 0))
+        capped_warnings = [
+            f"กลุ่ม cue {min(positions)}–{max(positions)} ยาวเกินช่วงแม้เร่งทั้งก้อนสูงสุดแล้ว "
+            f"({capped_speed:.2f}x) เสียงอาจล้นไปทับช่วงถัดไป"
+            for positions in capped_groups.values()
         ]
         if latest_end > int(refreshed["video_duration_ms"]) + 20:
             overflow = latest_end - int(refreshed["video_duration_ms"])
@@ -511,6 +525,7 @@ class JobWorker:
             ]
             warnings = [
                 *base_warnings,
+                *capped_warnings,
                 f"เสียงพากย์ยาวเกินวิดีโอ {overflow} ms; ตรวจ cue {', '.join(problem_positions)}",
             ]
             db.update_job(
@@ -530,7 +545,7 @@ class JobWorker:
             stage="synthesized",
             progress=92,
             dub_audio_path=data_relative(dub_wav),
-            warnings_json=json.dumps(base_warnings, ensure_ascii=False),
+            warnings_json=json.dumps([*base_warnings, *capped_warnings], ensure_ascii=False),
         )
 
     def _mux(self, job: dict) -> None:

@@ -14,7 +14,6 @@ from ..core.config import (
     MAX_SUBPROCESS_COMMAND_CHARS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
-    SEGMENT_SECONDS,
     ffmpeg_path,
     resolve_data_path,
 )
@@ -152,8 +151,12 @@ def _run(args: list[str], message: str) -> None:
         raise AudioError(result.stderr.strip() or message)
 
 
-def _mix_batch(inputs: list[tuple[Path, int]], origin: int, output: Path, filter_file: Path) -> None:
-    """Mix a batch of (audio, offset_ms) into a single mono stem starting at ``origin``."""
+def _mix_batch(inputs: list[tuple[Path, int]], output: Path, filter_file: Path) -> None:
+    """Mix a batch of (audio, offset_ms) into a single mono stem.
+
+    Offsets are absolute milliseconds on the master timeline; the stem starts
+    at 0 and callers place it with ``adelay`` when offsets are relative.
+    """
     binary = ffmpeg_path()
     if not binary:
         raise AudioError("ไม่พบ FFmpeg ใน PATH")
@@ -185,6 +188,21 @@ def _mix_batch(inputs: list[tuple[Path, int]], origin: int, output: Path, filter
     _run(args, "FFmpeg สร้าง stem ไม่สําเร็จ")
 
 
+def _mix_many(inputs: list[tuple[Path, int]], output: Path, work_dir: Path, prefix: str) -> None:
+    """Mix any number of (audio, offset_ms) inputs, batching to stay portable.
+
+    Batches of ``ASSEMBLY_STEM_SIZE`` keep every FFmpeg command under the
+    Windows command-length limit; parts already encode absolute timing so they
+    are re-mixed at offset 0.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if len(inputs) <= ASSEMBLY_STEM_SIZE:
+        _mix_batch(inputs, output, work_dir / f"{prefix}-filter.txt")
+        return
+    parts = _mix_to_parts(inputs, work_dir, f"{prefix}-part")
+    _mix_batch(parts, output, work_dir / f"{prefix}-final-filter.txt")
+
+
 def _speedup_segment(source: Path, target: Path, target_ms: int, source_duration_ms: int) -> float:
     """Speed a whole segment so it ends at ``target_ms`` from its start (origin=0).
 
@@ -212,31 +230,65 @@ def _speedup_segment(source: Path, target: Path, target_ms: int, source_duration
     return speed
 
 
-def _segments_for(cues: list[dict], segment_seconds: int) -> list[int]:
-    """Return the segment index for each completed cue, in position order.
+def _mix_to_parts(
+    inputs: list[tuple[Path, int]], work_dir: Path, prefix: str
+) -> list[tuple[Path, int]]:
+    """Mix inputs into part stems of at most ``ASSEMBLY_STEM_SIZE`` each.
 
-    With ``segment_seconds == 0`` every cue belongs to a single segment.
+    Parts already encode absolute timing, so they re-mix at offset 0.
     """
-    if not cues:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[tuple[Path, int]] = []
+    for batch_index in range(0, len(inputs), ASSEMBLY_STEM_SIZE):
+        part = work_dir / f"{prefix}-{batch_index // ASSEMBLY_STEM_SIZE}.wav"
+        _mix_batch(
+            inputs[batch_index:batch_index + ASSEMBLY_STEM_SIZE],
+            part,
+            work_dir / f"{prefix}-{batch_index // ASSEMBLY_STEM_SIZE}-filter.txt",
+        )
+        parts.append((part, 0))
+    return parts
+
+
+def singleton_parts(
+    inputs: list[tuple[Path, int]], work_dir: Path
+) -> list[tuple[Path, int]]:
+    """Mix isolated natural-rate cues into part stems for the master mix."""
+    if not inputs:
         return []
-    if segment_seconds <= 0:
-        return [0] * len(cues)
-    window_ms = segment_seconds * 1000
-    return [max(0, int(cue["start_ms"]) // window_ms) for cue in cues]
+    return _mix_to_parts(inputs, work_dir, "iso")
+
+
+def build_overlap_groups(timeline: list[dict]) -> list[list[dict]]:
+    """Partition placed cues into overlap-chained groups.
+
+    A new group starts wherever a cue begins at or after the previous cue's
+    end (a real gap or exact back-to-back).  Cues whose audio runs into the
+    next cue stay in one group so the group can be fitted with a single
+    uniform speed instead of speeding each cue differently.
+    """
+    groups: list[list[dict]] = []
+    for item in timeline:
+        if groups and item["actual_start_ms"] < groups[-1][-1]["actual_end_ms"]:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+    return groups
 
 
 def assemble(
     job_dir: Path, cues: list[dict], max_start_delay_ms: int = 1000, output_dir: Path | None = None
 ) -> tuple[Path, Path, int, list[dict]]:
-    """Assemble all cue audio into a dub master, speeding each time segment as a whole.
+    """Assemble all cue audio into a dub master without overlaps.
 
-    Cues are grouped into fixed time segments (``SEGMENT_SECONDS``).  Within a
-    segment the cues are placed on the timeline at their SRT times (delayed only
-    to avoid heavy overlap), then the segment is sped with a single ``atempo`` so
-    its total ends at the segment's last subtitle end.  This keeps the speaking
-    rate uniform within a segment instead of panicking each cue.  Returns
-    ``(wav, mp3, duration_ms, timeline)`` where timeline carries per-cue entries
-    plus the segment's ``segment_index``/``segment_speed`` for reporting.
+    Cues chained by overlap form a group: inside the group cues are placed
+    strictly back-to-back, then the whole group mix is sped with a single
+    ``atempo`` (capped at ``MAX_SEGMENT_SPEED``) to fit the group's last
+    subtitle end.  Every cue in the group therefore shares one speaking rate
+    instead of each cue running at its own speed.  Isolated cues keep their
+    natural rate and go straight to the master mix.  Returns
+    ``(wav, mp3, duration_ms, timeline)``; per-cue ``segment_index`` /
+    ``segment_speed`` now describe the overlap group.
     """
     binary = ffmpeg_path()
     if not binary:
@@ -260,93 +312,101 @@ def assemble(
             return resolved
         return resolve_data_path(candidate)
 
-    seg_indexes = _segments_for(completed, SEGMENT_SECONDS)
-    segments: dict[int, list[dict]] = {}
-    for item, seg in zip(timeline, seg_indexes, strict=True):
-        item["segment_index"] = seg
-        segments.setdefault(seg, []).append(item)
-
     master_wav = output_dir / "output.wav"
-    segment_wavs: list[tuple[Path, int]] = []
-    final_speed: dict[int, float] = {}
+    master_inputs: list[tuple[Path, int]] = []
+    singleton_inputs: list[tuple[Path, int]] = []
+    latest_end_ms = 0
 
-    for seg in sorted(segments):
-        group = segments[seg]
-        origin = min(item["actual_start_ms"] for item in group)
-        # Build this segment's stem: place each cue at ``actual_start_ms - origin``.
-        # A long segment may need batching so the command stays under the limit.
-        inputs: list[tuple[Path, int]] = []
-        raw_seg = seg_dir / f"seg-{seg:03d}-raw.wav"
-        batches = [group[i:i + ASSEMBLY_STEM_SIZE] for i in range(0, len(group), ASSEMBLY_STEM_SIZE)]
-        if len(batches) == 1:
-            inputs = [
-                (cue_audio_path(item["cue"]["audio_path"]), item["actual_start_ms"] - origin)
-                for item in group
-            ]
-            _mix_batch(inputs, origin, raw_seg, seg_dir / f"seg-{seg:03d}-filter.txt")
-        else:
-            stem_parts: list[tuple[Path, int]] = []
-            for bi, batch in enumerate(batches):
-                part = seg_dir / f"seg-{seg:03d}-part-{bi}.wav"
-                _mix_batch(
-                    [
-                        (cue_audio_path(item["cue"]["audio_path"]), item["actual_start_ms"] - origin)
-                        for item in batch
-                    ],
-                    origin, part, seg_dir / f"seg-{seg:03d}-part-{bi}-filter.txt",
-                )
-                stem_parts.append((part, 0))
-            _mix_batch(stem_parts, origin, raw_seg, seg_dir / f"seg-{seg:03d}-final-filter.txt")
-
-        # Speed the whole segment to fit its last subtitle end.
-        fitted_seg = seg_dir / f"seg-{seg:03d}.wav"
-        # Target = last subtitle end (fall back to the segment's actual end when
-        # the cue has no explicit subtitle end); source duration = the raw stem's
-        # actual span so atempo brings it back to the target.
+    for group_index, group in enumerate(build_overlap_groups(timeline)):
+        # Anchor the group at its requested start or at the previous group's
+        # *fitted* end, whichever is later.  Anchoring at the unsped end (or
+        # keeping the capped planning delay) leaves a silence gap whenever an
+        # earlier group was sped up, and the inflated delay shrinks this
+        # group's target window into a spurious over-speed + warning.
+        origin = max(group[0]["requested_start_ms"], latest_end_ms)
+        shift = origin - group[0]["actual_start_ms"]
+        for item in group:
+            item["actual_start_ms"] += shift
+            item["actual_end_ms"] += shift
+        # Lay cues strictly back-to-back so nothing inside the group overlaps.
+        for previous, current in zip(group, group[1:], strict=False):
+            if current["actual_start_ms"] < previous["actual_end_ms"]:
+                delta = previous["actual_end_ms"] - current["actual_start_ms"]
+                current["actual_start_ms"] += delta
+                current["actual_end_ms"] += delta
+        span_start_ms = group[0]["actual_start_ms"]
+        span_end_ms = max(item["actual_end_ms"] for item in group)
+        # Target = the group's last subtitle end (fall back to the actual end
+        # when a cue has no explicit subtitle end).
         target_end_ms = max(
             int(item["cue"].get("end_ms", item["actual_end_ms"])) for item in group
         )
-        segment_duration_ms = max(item["actual_end_ms"] for item in group) - origin
-        speed = _speedup_segment(raw_seg, fitted_seg, target_end_ms - origin, segment_duration_ms)
-        final_speed[seg] = speed
+        span_ms, target_ms = span_end_ms - span_start_ms, target_end_ms - span_start_ms
+        required_speed = span_ms / target_ms if target_ms > 0 and span_ms > target_ms else 1.0
+        capped = required_speed > MAX_SEGMENT_SPEED
         for item in group:
-            item["segment_speed"] = speed
-        segment_wavs.append((fitted_seg, origin))
+            item["segment_index"] = group_index
+            item["delay_ms"] = item["actual_start_ms"] - item["requested_start_ms"]
+            item["overlap_ms"] = 0
+            item["group_capped"] = capped
+            item["group_overrun_ms"] = span_ms - target_ms if capped else 0
 
-    # Mix all sped segments into the master, delayed by each segment's origin.
-    master_filters: list[dict] = []
-    for index, (path, origin) in enumerate(segment_wavs):
-        master_filters.append({"input": path, "delay": origin, "label": f"s{index}"})
-    segment_end_ms = max(
-        int(item["actual_end_ms"]) for item in timeline
-    )
+        if len(group) == 1 and required_speed <= 1.0:
+            # Isolated cue at natural rate: straight to the master mix.
+            item = group[0]
+            item["segment_speed"] = 1.0
+            singleton_inputs.append(
+                (cue_audio_path(item["cue"]["audio_path"]), item["actual_start_ms"])
+            )
+            latest_end_ms = max(latest_end_ms, span_end_ms)
+            continue
+
+        raw_group = seg_dir / f"group-{group_index:03d}-raw.wav"
+        _mix_many(
+            [
+                (cue_audio_path(item["cue"]["audio_path"]), item["actual_start_ms"] - span_start_ms)
+                for item in group
+            ],
+            raw_group,
+            seg_dir,
+            f"group-{group_index:03d}",
+        )
+        fitted_group = seg_dir / f"group-{group_index:03d}.wav"
+        speed = _speedup_segment(raw_group, fitted_group, target_ms, span_ms)
+        # Rewrite placements to the fitted (post-speedup) positions so the
+        # report, the next group's anchor and the video-overrun gate all see
+        # where speech really lands instead of the unsped shadow.
+        for item in group:
+            item["actual_start_ms"] = origin + round((item["actual_start_ms"] - origin) / speed)
+            item["actual_end_ms"] = origin + round((item["actual_end_ms"] - origin) / speed)
+            item["delay_ms"] = item["actual_start_ms"] - item["requested_start_ms"]
+            item["overlap_ms"] = 0
+            item["segment_speed"] = speed
+        master_inputs.append((fitted_group, span_start_ms))
+        # A capped group still overruns its target; the remainder pushes the
+        # following groups later (and the video-overrun gate may park the job).
+        latest_end_ms = max(
+            latest_end_ms, max(item["actual_end_ms"] for item in group)
+        )
+
+    # Mix isolated cues (batched) and fitted group stems into one raw master,
+    # then limit + pad/trim it to the final length.
+    raw_master = seg_dir / "master-raw.wav"
+    all_inputs = [(path, 0) for path, _ in singleton_parts(singleton_inputs, seg_dir)] + master_inputs
+    _mix_many(all_inputs, raw_master, seg_dir, "master")
     final_end_ms = max(
-        segment_end_ms,
+        latest_end_ms,
         max(int(c.get("end_ms", 0)) for c in completed),
     )
-    args = [binary, "-y", "-v", "error"]
-    filters = []
-    for f in master_filters:
-        args.extend(["-i", str(f["input"])])
-        filters.append(f"[{f['label']}:0]adelay={f['delay']}:all=1[{f['label']}]")
-    labels = "".join(f"[{f['label']}]" for f in master_filters)
-    silence_input = len(segment_wavs)
-    args.extend(
-        ["-f", "lavfi", "-t", f"{final_end_ms / 1000:.3f}", "-i",
-         f"anullsrc=r={SAMPLE_RATE}:cl=mono"]
-    )
-    filters.append(
-        f"{labels}[{silence_input}:a]amix=inputs={len(segment_wavs) + 1}:duration=longest:normalize=0,"
-        f"alimiter=limit=0.95:attack=5:release=50,aresample={SAMPLE_RATE}[out]"
-    )
-    filter_args = _filter_complex_args(";\n".join(filters), seg_dir / "final-filter.txt")
-    args.extend(
+    _run(
         [
-            *filter_args, "-map", "[out]", "-t", f"{final_end_ms / 1000:.3f}",
+            binary, "-y", "-v", "error", "-i", str(raw_master),
+            "-filter:a", f"alimiter=limit=0.95:attack=5:release=50,aresample={SAMPLE_RATE},apad",
+            "-t", f"{final_end_ms / 1000:.3f}",
             "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(master_wav),
-        ]
+        ],
+        "FFmpeg ประกอบเสียงไม่สําเร็จ",
     )
-    _run(args, "FFmpeg ประกอบเสียงไม่สําเร็จ")
 
     mp3_out = output_dir / "output.mp3"
     _run(

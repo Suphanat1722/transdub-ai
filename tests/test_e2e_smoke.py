@@ -103,3 +103,27 @@ def test_affected_chunk_helper_and_static_wizard(monkeypatch, tmp_path: Path) ->
     assert "saveAllCues" in js
     assert "affected" not in js  # helper stays backend-only
     assert "/queue" in js
+
+
+def test_reassemble_action_requeues_finished_job(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    response = client.post(
+        "/api/jobs",
+        data={"youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+    )
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+
+    # Fresh job has nothing to reassemble.
+    assert client.post(f"/api/jobs/{job_id}/actions", json={"action": "reassemble"}).status_code == 409
+
+    db.replace_translation_cues(job_id, [
+        {"start_ms": 0, "end_ms": 1000, "text": "สวัสดี", "source_cue_indexes": [1],
+         "translation_chunk_id": "c0", "warnings": []}
+    ])
+    db.update_job(job_id, stage="completed", status="completed")
+    retry = client.post(f"/api/jobs/{job_id}/actions", json={"action": "reassemble"})
+    assert retry.status_code == 202
+    body = retry.json()
+    assert body["stage"] == "synthesizing"
+    assert body["status"] == "queued"
