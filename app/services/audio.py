@@ -10,7 +10,6 @@ from ..core.config import (
     ASSEMBLY_STEM_SIZE,
     CHANNELS,
     MAX_SEGMENT_SPEED,
-    MAX_SPEED,
     MAX_SUBPROCESS_COMMAND_CHARS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
@@ -47,70 +46,6 @@ def write_pcm_wav(path: Path, pcm: bytes) -> int:
         output.setframerate(SAMPLE_RATE)
         output.writeframes(pcm)
     return wav_duration_ms(path)
-
-
-def fit_before_next_start(
-    source: Path,
-    target: Path,
-    available_ms: int | None,
-    max_speed: float = MAX_SPEED,
-    trim_tail: bool = True,
-) -> tuple[int, float, bool]:
-    """Speed up a cue to fit before the next start, optionally trimming the tail.
-
-    ``trim_tail=True`` keeps the historical behaviour: if the fastest allowed
-    speed still overruns ``available_ms`` the tail is cut so the cue ends on
-    time.  ``trim_tail=False`` never cuts words; it speeds the whole clip up to
-    ``max_speed`` and, if it still overruns, returns the natural overrun so the
-    caller can re-synthesize at a higher rate or flag the cue for review.
-    Returns ``(final_ms, speed, reached_next)``.
-
-    Note: the pipeline now speeds whole segments rather than individual cues;
-    this helper is kept as a reusable utility (and for tests).
-    """
-    original_ms = wav_duration_ms(source)
-    if available_ms is None or original_ms <= available_ms:
-        if source.resolve() != target.resolve():
-            shutil.copy2(source, target)
-        return original_ms, 1.0, False
-    required = original_ms / available_ms if available_ms > 0 else float("inf")
-    speed = min(required, max_speed)
-    final_ms = round(original_ms / speed)
-    trimmed = False
-    if trim_tail and final_ms > available_ms:
-        trimmed = True
-        final_ms = available_ms
-    binary = ffmpeg_path()
-    if not binary:
-        raise AudioError("ไม่พบ FFmpeg ใน PATH")
-    args = [
-        binary,
-        "-y",
-        "-v",
-        "error",
-        "-i",
-        str(source),
-        "-filter:a",
-        f"atempo={speed:.8f}",
-    ]
-    if trimmed:
-        args.extend(["-t", f"{final_ms / 1000:.3f}"])
-    args.extend(
-        [
-            "-ar",
-            str(SAMPLE_RATE),
-            "-ac",
-            str(CHANNELS),
-            "-c:a",
-            "pcm_s16le",
-            str(target),
-        ]
-    )
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode:
-        raise AudioError(result.stderr.strip() or "FFmpeg ปรับความเร็วไม่สําเร็จ")
-    measured = wav_duration_ms(target)
-    return measured, speed, measured > available_ms + 20
 
 
 def plan_timeline(cues: list[dict], max_start_delay_ms: int) -> list[dict]:

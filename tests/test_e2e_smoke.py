@@ -14,7 +14,7 @@ from app.core.config import ROOT
 from app.main import create_app
 from app.repositories import database as db
 from app.services.translation import affected_chunk_ids_for_source_index
-from app.services.worker import worker
+from app.services.worker import unique_export_path, worker
 
 from .test_database_pipeline import configure_temp_data
 
@@ -128,3 +128,11 @@ def test_reassemble_action_requeues_finished_job(monkeypatch, tmp_path: Path) ->
     body = retry.json()
     assert body["stage"] == "synthesizing"
     assert body["status"] == "queued"
+
+
+def test_unique_export_path_avoids_collision(tmp_path: Path) -> None:
+    assert unique_export_path(tmp_path, "clip.th-dub", ".mp4") == tmp_path / "clip.th-dub.mp4"
+    (tmp_path / "clip.th-dub.mp4").write_bytes(b"x")
+    assert unique_export_path(tmp_path, "clip.th-dub", ".mp4") == tmp_path / "clip.th-dub -2.mp4"
+    (tmp_path / "clip.th-dub -2.mp4").write_bytes(b"x")
+    assert unique_export_path(tmp_path, "clip.th-dub", ".mp4") == tmp_path / "clip.th-dub -3.mp4"

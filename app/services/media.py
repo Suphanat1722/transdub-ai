@@ -4,7 +4,9 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +15,10 @@ from .gpu import GPU_LOCK
 
 class MediaError(RuntimeError):
     """An error that can be shown safely in the web UI."""
+
+
+class SeparationCancelled(RuntimeError):
+    """Raised when pause/cancel arrives while Demucs is running."""
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,64 @@ def _run(command: Sequence[str], *, error_prefix: str) -> subprocess.CompletedPr
         detail = (exc.stderr or exc.stdout or "").strip().splitlines()
         message = detail[-1] if detail else "ไม่ทราบรายละเอียด"
         raise MediaError(f"{error_prefix}: {message}") from exc
+
+
+def _run_watched(
+    command: Sequence[str],
+    *,
+    error_prefix: str,
+    log_path: Path | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    on_heartbeat: Callable[[float], None] | None = None,
+    beat_seconds: float = 30.0,
+) -> None:
+    """Run a long subprocess with liveness beats and cooperative cancellation.
+
+    Demucs on CPU takes many minutes with no output of its own surfaced, so a
+    frozen progress bar is indistinguishable from a hang.  The caller gets a
+    heartbeat every ``beat_seconds`` (to report elapsed time) and may stop the
+    run by making ``should_stop`` true; the process is then terminated and
+    ``SeparationCancelled`` is raised so the worker can apply pause/cancel
+    immediately instead of waiting out the run.  stderr goes to ``log_path``
+    (a pipe would fill and block); its tail is attached to failure messages.
+    """
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as stack:
+        log_file = stack.enter_context(open(log_path, "wb")) if log_path is not None else None
+        try:
+            proc = subprocess.Popen(
+                list(command),
+                stdout=subprocess.DEVNULL,
+                stderr=log_file or subprocess.DEVNULL,
+            )
+        except FileNotFoundError as exc:
+            raise MediaError(f"ไม่พบโปรแกรม {command[0]} กรุณาติดตั้งและเพิ่มไว้ใน PATH") from exc
+        start = time.monotonic()
+        last_beat = start
+        while True:
+            code = proc.poll()
+            if code is not None:
+                break
+            if should_stop is not None and should_stop():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise SeparationCancelled("หยุดการแยกเสียงตามที่ขอ")
+            now = time.monotonic()
+            if on_heartbeat is not None and now - last_beat >= beat_seconds:
+                last_beat = now
+                on_heartbeat(now - start)
+            time.sleep(0.5)
+        if code != 0:
+            tail = ""
+            if log_path is not None and log_path.is_file():
+                lines = log_path.read_bytes()[-2000:].decode("utf-8", errors="replace").strip().splitlines()
+                tail = lines[-1] if lines else ""
+            raise MediaError(f"{error_prefix}: {tail or f'exit {code}'}")
 
 
 def probe_media(path: Path) -> MediaInfo:
@@ -116,11 +180,13 @@ def separate_background(
     original_audio: Path,
     separation_root: Path,
     notify: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    on_heartbeat: Callable[[float], None] | None = None,
 ) -> tuple[Path, str]:
     device = "cuda" if _cuda_available() else "cpu"
 
     def invoke(selected_device: str) -> None:
-        _run(
+        _run_watched(
             [
                 sys.executable,
                 "-m",
@@ -135,11 +201,16 @@ def separate_background(
                 str(original_audio),
             ],
             error_prefix=f"แยกเสียงด้วย Demucs ({selected_device}) ไม่สำเร็จ",
+            log_path=separation_root / "runner.log",
+            should_stop=should_stop,
+            on_heartbeat=on_heartbeat,
         )
 
     with GPU_LOCK:
         try:
             invoke(device)
+        except SeparationCancelled:
+            raise
         except MediaError:
             if device != "cuda":
                 raise
@@ -160,10 +231,14 @@ def create_background_stem(
     work_dir: Path,
     target: Path,
     notify: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    on_heartbeat: Callable[[float], None] | None = None,
 ) -> tuple[Path, str]:
     """Run Demucs and retain only a compact lossless background artifact."""
     separation_root = work_dir / "demucs"
-    background, device = separate_background(original_audio, separation_root, notify)
+    background, device = separate_background(
+        original_audio, separation_root, notify, should_stop, on_heartbeat
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     _run(
         [

@@ -16,6 +16,7 @@ from ..core.config import (
     CACHE_FORMAT_REVISION,
     CACHE_MAX_AGE_DAYS,
     CACHE_MAX_BYTES,
+    DATA_DIR,
     DB_PATH,
     EDGE_TTS_DEFAULT_VOICE,
     PIPELINE_REVISION,
@@ -93,7 +94,35 @@ def _run_alembic() -> None:
     command.upgrade(configuration, "head")
 
 
+def backup_database(max_backups: int = 5) -> Path | None:
+    """Copy app.db into data/backups/ (one file per day, pruned to ``max``).
+
+    Uses the SQLite online backup API so it is safe while the app runs.
+    Returns the backup path, or None when there is no database yet.
+    """
+    ensure_directories()
+    if not DB_PATH.is_file():
+        return None
+    backup_dir = DATA_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    target = backup_dir / f"app-{datetime.now(UTC).strftime('%Y%m%d')}.db"
+    if not target.is_file():
+        source = sqlite3.connect(DB_PATH)
+        try:
+            dest = sqlite3.connect(target)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+        finally:
+            source.close()
+    for old in sorted(backup_dir.glob("app-*.db"))[:-max_backups]:
+        old.unlink(missing_ok=True)
+    return target
+
+
 def init_db() -> None:
+    backup_database()
     fresh = not _has_table("jobs")
     if fresh:
         from alembic import command

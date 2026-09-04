@@ -13,7 +13,6 @@ from app.services.audio import (
     _filter_complex_args,
     assemble,
     build_overlap_groups,
-    fit_before_next_start,
     plan_timeline,
     write_pcm_wav,
 )
@@ -27,44 +26,6 @@ def tone(duration_ms: int, frequency: int = 440) -> bytes:
         struct.pack("<h", int(5000 * math.sin(2 * math.pi * frequency * i / SAMPLE_RATE)))
         for i in range(frames)
     )
-
-
-def test_speeds_audio_only_enough_to_avoid_the_next_start(tmp_path):
-    source, output = tmp_path / "raw.wav", tmp_path / "fit.wav"
-    assert 990 <= write_pcm_wav(source, tone(1000)) <= 1010
-    final_ms, speed, overlap = fit_before_next_start(source, output, 800)
-    assert 1.20 < speed < 1.30
-    assert 780 <= final_ms <= 820
-    assert not overlap
-
-
-def test_caps_collision_speed_at_1_25(tmp_path):
-    source, output = tmp_path / "raw.wav", tmp_path / "fit.wav"
-    write_pcm_wav(source, tone(2000))
-    final_ms, speed, overlap = fit_before_next_start(source, output, 800)
-    assert speed == 1.25
-    # Fastest allowed speed still overruns, so the tail is trimmed to fit:
-    assert 780 <= final_ms <= 820
-    assert not overlap
-
-
-def test_last_cue_keeps_its_natural_duration(tmp_path):
-    source, output = tmp_path / "raw.wav", tmp_path / "natural.wav"
-    write_pcm_wav(source, tone(2000))
-    final_ms, speed, overlap = fit_before_next_start(source, output, None)
-    assert 1990 <= final_ms <= 2010
-    assert speed == 1.0
-    assert not overlap
-
-
-def test_final_cue_can_speed_to_1_5(tmp_path):
-    source, output = tmp_path / "raw.wav", tmp_path / "fit.wav"
-    write_pcm_wav(source, tone(3000))
-    # A long final cue with a narrow slot allows a caller-provided higher cap.
-    final_ms, speed, overlap = fit_before_next_start(source, output, 1800, max_speed=1.5)
-    assert speed == 1.5
-    assert 1700 <= final_ms <= 1900
-    assert not overlap
 
 
 def test_assemble_timeline_and_mp3(tmp_path):

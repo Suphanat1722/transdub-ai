@@ -12,9 +12,7 @@ def configure_temp_data(monkeypatch, root: Path) -> None:
         "DB_PATH": root / "app.db",
         "JOBS_DIR": root / "jobs",
         "CACHE_DIR": root / "cache",
-        "IMPORTS_DIR": root / "imports",
         "LOG_DIR": root / "logs",
-        "MEDIA_CACHE_DIR": root / "media-cache",
         "OUTPUTS_DIR": root / "outputs",
     }
     for name, value in mapping.items():
@@ -158,3 +156,17 @@ def test_purge_cache_keeps_entries_referenced_by_other_jobs(monkeypatch, tmp_pat
     with db.connect() as conn:
         left = conn.execute("SELECT COUNT(*) FROM audio_cache WHERE cache_key='shared-key'").fetchone()[0]
     assert left == 1
+
+
+def test_backup_database_prunes_to_five(monkeypatch, tmp_path: Path) -> None:
+    configure_temp_data(monkeypatch, tmp_path)
+    db.init_db()  # itself backs up once
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for day in range(7):
+        (backup_dir / f"app-2020010{day}.db").write_bytes(b"old")
+    result = db.backup_database()
+    assert result is not None and result.is_file()
+    remaining = sorted(path.name for path in backup_dir.glob("app-*.db"))
+    assert len(remaining) == 5
+    assert result.name in remaining

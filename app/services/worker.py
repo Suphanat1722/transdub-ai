@@ -6,6 +6,7 @@ import logging
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from ..core.config import (
     JOBS_DIR,
     OUTPUTS_DIR,
     PIPELINE_REVISION,
+    TTS_SYNTH_WORKERS,
     data_relative,
     resolve_data_path,
 )
@@ -28,6 +30,7 @@ from .audio import (
 from .edge_tts_synth import synth_cue
 from .media import (
     MediaError,
+    SeparationCancelled,
     create_background_stem,
     extract_original_audio,
     mix_output,
@@ -38,6 +41,20 @@ from .translation import QuotaWait, TranslationError, serialize_srt, translate
 from .youtube import YouTubeError, download_video, fetch_subtitle, video_filename
 
 logger = logging.getLogger(__name__)
+
+
+def unique_export_path(directory: Path, stem: str, suffix: str) -> Path:
+    """Return a non-existing path, appending `` -2``, `` -3``, ... on collision.
+
+    Re-running the same clip (or two clips with one title) must never silently
+    overwrite a previous export.
+    """
+    candidate = directory / f"{stem}{suffix}"
+    index = 2
+    while candidate.exists():
+        candidate = directory / f"{stem} -{index}{suffix}"
+        index += 1
+    return candidate
 
 
 class JobWorker:
@@ -285,27 +302,56 @@ class JobWorker:
         db.update_job(job_id, status="separating", progress=12, wait_reason=None)
         job_dir = JOBS_DIR / job_id
         background = job_dir / "artifacts" / "background.flac"
-        if (job.get("separation_mode") or "demucs") == "fast":
-            # Fast mode: skip Demucs entirely, reuse the original mix as the
-            # background (user controls its level via background_volume at mux).
-            import shutil
-            import subprocess
 
-            background.parent.mkdir(parents=True, exist_ok=True)
-            original = resolve_data_path(job["original_audio_path"])
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", str(original),
-                 "-map", "0:a:0", "-c:a", "flac", "-compression_level", "8", str(background)],
-                capture_output=True, text=True,
+        def should_stop() -> bool:
+            current = db.get_job(job_id, include_cues=False) or {}
+            return current.get("control_requested") in {"pause", "cancel"}
+
+        def heartbeat(elapsed_seconds: float) -> None:
+            minutes = int(elapsed_seconds // 60)
+            # Creep the bar so a long CPU run reads as alive, not frozen.
+            message = "กำลังแยกเสียงพูดด้วย Demucs"
+            if minutes:
+                message += f" ({minutes} นาทีแล้ว — บน CPU อาจใช้เวลาหลายนาที)"
+            if should_stop():
+                message += " — รับคำสั่งพัก/ยกเลิกแล้ว กำลังหยุด"
+            db.update_job(
+                job_id,
+                progress=min(24, 12 + minutes // 2),
+                wait_reason=message,
             )
-            if result.returncode:
-                raise RuntimeError(f"สร้างเสียงพื้นหลังโหมดเร็วไม่สำเร็จ: {result.stderr.strip()}")
+
+        try:
+            if (job.get("separation_mode") or "demucs") == "fast":
+                # (fast path unchanged)
+                import shutil
+                import subprocess
+
+                background.parent.mkdir(parents=True, exist_ok=True)
+                original = resolve_data_path(job["original_audio_path"])
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(original),
+                     "-map", "0:a:0", "-c:a", "flac", "-compression_level", "8", str(background)],
+                    capture_output=True, text=True,
+                )
+                if result.returncode:
+                    raise RuntimeError(f"สร้างเสียงพื้นหลังโหมดเร็วไม่สำเร็จ: {result.stderr.strip()}")
+                shutil.rmtree(job_dir / "work" / "demucs", ignore_errors=True)
+                db.record_attempt(job_id, "separate", "ok", model="fast-copy", message="ข้าม Demucs (โหมดเร็ว)")
+            else:
+                create_background_stem(
+                    resolve_data_path(job["original_audio_path"]),
+                    job_dir / "work",
+                    background,
+                    should_stop=should_stop,
+                    on_heartbeat=heartbeat,
+                )
+        except SeparationCancelled as exc:
+            # Drop partial Demucs output; the rerun starts clean on resume.
             shutil.rmtree(job_dir / "work" / "demucs", ignore_errors=True)
-            db.record_attempt(job_id, "separate", "ok", model="fast-copy", message="ข้าม Demucs (โหมดเร็ว)")
-        else:
-            create_background_stem(
-                resolve_data_path(job["original_audio_path"]), job_dir / "work", background
-            )
+            if not self._handle_control(job_id):
+                raise RuntimeError("การแยกเสียงถูกขัดจังหวะ") from exc
+            return
         db.put_artifact(job_id, "background", background, "audio/flac")
         db.update_job(
             job_id,
@@ -391,18 +437,38 @@ class JobWorker:
 
     def _synthesize(self, job: dict) -> None:
         job_id = job["id"]
-        cue = db.next_cue(job_id)
-        if cue is None:
+        # Claim a batch up front so no cue is synthesized twice; each cue is
+        # independent (own cache key, own files), so they run concurrently.
+        batch: list[dict] = []
+        for _ in range(max(1, TTS_SYNTH_WORKERS)):
+            cue = db.next_cue(job_id)
+            if cue is None:
+                break
+            db.update_cue(cue["id"], status="processing", error=None)
+            batch.append(cue)
+        if not batch:
             self._assemble_dub(job)
             return
         db.update_job(
             job_id,
             status="synthesizing",
             stage="synthesizing",
-            current_cue_id=cue["id"],
+            current_cue_id=batch[0]["id"],
             wait_reason=None,
         )
-        self._generate_cue(job, cue)
+        first_error: BaseException | None = None
+        with ThreadPoolExecutor(
+            max_workers=len(batch), thread_name_prefix="tts"
+        ) as pool:
+            futures = [pool.submit(self._generate_cue, job, cue) for cue in batch]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
         counts = db.cue_counts(job_id)
         total = sum(counts.values()) or 1
         progress = 55 + (counts.get("completed", 0) / total) * 35
@@ -581,11 +647,15 @@ class JobWorker:
             if not local_dir.is_dir():
                 logger.warning("โฟลเดอร์ส่งออกไม่มีอยู่จริง: %s", local_dir)
             else:
-                exported_path = local_dir / f"{Path(job['filename']).stem}.th-dub.mp4"
+                exported_path = unique_export_path(
+                    local_dir, f"{Path(job['filename']).stem}.th-dub", ".mp4"
+                )
                 shutil.copy2(output, exported_path)
         else:
             OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-            exported_path = OUTPUTS_DIR / f"{Path(job['filename']).stem}.th-dub.mp4"
+            exported_path = unique_export_path(
+                OUTPUTS_DIR, f"{Path(job['filename']).stem}.th-dub", ".mp4"
+            )
             shutil.copy2(output, exported_path)
 
         db.put_artifact(job_id, "final_video", output, "video/mp4")
