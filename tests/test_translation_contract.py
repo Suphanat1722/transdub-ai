@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import app.services.translation as translation
+from app.repositories import database as db
 from app.services.translation import (
     Chunk,
+    ChunkValidationError,
     TranslationError,
+    _translate_chunk,
+    absurd_cue_error,
     build_chunks,
     parse_model_srt,
     serialize_srt,
     split_chunk,
     validate_chunk,
 )
+
+from .test_database_pipeline import configure_temp_data
 
 
 def source_cues() -> list[dict]:
@@ -200,3 +208,59 @@ def test_translation_validation_rejects_tts_unsafe_output(text: str) -> None:
     cues, warnings = validate_chunk(text, source_cues(), Chunk("c1", 0, 0, 1, 0, 1))
     assert len(cues) == 1
     assert warnings
+
+
+def test_absurd_cue_error_flags_runaway_merge_only() -> None:
+    def cue(text: str, start: int, end: int) -> dict:
+        return {"text": text, "start_ms": start, "end_ms": end}
+
+    assert absurd_cue_error([cue("สวัสดีตอนเช้า", 0, 4000)]) is None
+    # Long but roomy is fine: 500 chars in 30s is unhurried speech.
+    assert absurd_cue_error([cue("ก" * 500, 0, 30_000)]) is None
+    # 1558 chars in 4.88s (319 chars/s) can never be spoken or fitted.
+    message = absurd_cue_error([cue("ก" * 1558, 3670880, 3675760)])
+    assert message is not None and "ยาวผิดปกติ" in message
+
+
+def test_translate_chunk_splits_on_runaway_merge(monkeypatch, tmp_path) -> None:
+    configure_temp_data(monkeypatch, tmp_path)
+    db.init_db()
+    db.create_video_job(
+        job_id="absurd", filename="v.mp4", source_path="https://x", source_language="en",
+        pause_after_transcription=False, pause_after_translation=False,
+        background_volume=100, voice_volume=100,
+    )
+    source = [
+        {"position": 1, "source_index": "1", "start_ms": 3670880, "end_ms": 3675760, "text": "Stuff."},
+        {"position": 2, "source_index": "2", "start_ms": 3675760, "end_ms": 3680000, "text": "More."},
+    ]
+    chunk = Chunk("absurd-chunk", 0, 0, 1, 0, 1)
+
+    class FakeModels:
+        def __init__(self, text: str):
+            self._text = text
+
+        def list(self):
+            return []
+
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(
+                text=self._text,
+                usage_metadata=None,
+                candidates=[SimpleNamespace(finish_reason="STOP")],
+            )
+
+    mega = "1\n01:01:10,880 --> 01:01:15,760\n" + "ก" * 1558 + "\n"
+    with pytest.raises(ChunkValidationError, match="ยาวผิดปกติ"):
+        _translate_chunk(
+            job_id="absurd", source=source, chunk=chunk, source_language="en",
+            client=SimpleNamespace(models=FakeModels(mega)), models=["m"],
+        )
+
+    normal = "1\n01:01:10,880 --> 01:01:15,760\nสวัสดีตอนเช้า\n"
+    cues, _warnings, model = _translate_chunk(
+        job_id="absurd", source=source, chunk=chunk, source_language="en",
+        client=SimpleNamespace(models=FakeModels(normal)), models=["m"],
+    )
+    assert model == "m"
+    assert cues[0]["text"] == "สวัสดีตอนเช้า"

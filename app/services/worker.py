@@ -610,7 +610,7 @@ class JobWorker:
                 capped_speed = max(capped_speed, float(item.get("segment_speed") or 0))
         capped_warnings = [
             f"กลุ่ม cue {min(positions)}–{max(positions)} ยาวเกินช่วงแม้เร่งทั้งก้อนสูงสุดแล้ว "
-            f"({capped_speed:.2f}x) เสียงอาจล้นไปทับช่วงถัดไป"
+            f"({capped_speed:.2f}x) เสียงส่วนเกินดันให้ช่วงถัดไปเริ่มช้าลง"
             for positions in capped_groups.values()
         ]
         if latest_end > int(refreshed["video_duration_ms"]) + 20:

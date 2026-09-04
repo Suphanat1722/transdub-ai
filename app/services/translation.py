@@ -31,7 +31,7 @@ DEFAULT_TRANSLATION_PROMPT = """คุณเป็นนักแปลซับ
 ## กฎการแปลเนื้อหา
 
 1. รักษาความหมาย ข้อมูล น้ำเสียง และเจตนาของต้นฉบับให้ครบถ้วน ห้ามเพิ่มข้อมูลที่ไม่มีในต้นฉบับ **และใช้เวลาของแต่ละ cue ให้เต็มพอดี**: ดู timecode ของแต่ละ cue แล้วตั้งเป้าความยาวคำแปลประมาณ `วินาที × 15 ตัวอักษรไทย` — ช่องไหนต้นฉบับพูดแน่นจนเกินงบ ให้แปลกระชับแบบภาษาพูด ตัดคำซ้ำซ้อนได้ (เช่น "บัญชีธนาคาร" → "บัญชี" ถ้าบริบทสื่ออยู่แล้วว่าเป็นธนาคาร) ช่องไหนเวลาเหลือ ให้ใช้ถ้อยคำเต็มตามธรรมชาติ ห้ามยัดคำไร้ความหมาย ห้ามตัดข้อเท็จจริงหรือสาระ
-2. ใช้ภาษาไทยแบบภาษาพูดที่เป็นธรรมชาติ เหมาะกับการพากย์และ TTS ไม่แปลแข็งแบบคำต่อคำ
+2. ใช้ภาษาไทยแบบภาษาพูดที่เป็นธรรมชาติ เหมาะกับการพากย์และ TTS ไม่แปลแข็งแบบคำต่อคำ วางจุลภาค (,) ตรงรอยต่ออนุประโยคหรือจุดที่ควรเว้นจังหวะหายใจ เพราะเสียง TTS ใช้จุลภาคเป็นสัญญาณหยุด ถ้าไม่มี TTS จะเดาจุดหยุดเองและอาจหยุดผิดที่ ห้ามโรยจุลภาคทุกช่องว่าง
 3. **สรรพนามและระดับภาษา**: เลือกตั้งแต่ cue แรกโดยดูจากบริบท (เพศ/บุคลิกผู้พูด น้ำเสียง กลุ่มเป้าหมาย) ถ้าบริบทไม่ชัดเจน ให้ใช้ "เรา" แบบเป็นกลางไว้ก่อน แล้วใช้คำเดิมนั้นตลอดทั้งไฟล์ ห้ามสลับไปมาโดยไม่มีเหตุผลจากต้นฉบับ (เช่น เปลี่ยนเพราะเปลี่ยนผู้พูดจริง)
 
 ## กฎการรวม/แบ่ง cue
@@ -159,6 +159,11 @@ THAI_FRAGMENT_TEXT = {"และ", "แต่", "หรือ", "เพราะ
 ALIGNMENT_TOLERANCE_MS = 700
 SHORT_CUE_ALIGNMENT_MS = 1_000
 MIN_SPLIT_CUES = 2
+# A merged block beyond this is physically unpronounceable in its slot
+# (~4x normal pace): accepting it poisons timing for the whole region
+# (e.g. 100s of audio in a 5s slot), so the chunk must split and retry.
+ABSURD_CUE_CHARS = 300
+ABSURD_CUE_DENSITY = 60.0
 
 
 class TranslationError(RuntimeError):
@@ -279,6 +284,22 @@ def build_chunks(job_id: str, cues: list[dict]) -> list[Chunk]:
 def _reindex_chunks(chunks: list[Chunk]) -> None:
     for index, chunk in enumerate(chunks):
         chunk.index = index
+
+
+def absurd_cue_error(cues: list[dict]) -> str | None:
+    """Describe the first physically impossible cue, if any.
+
+    A runaway merge (hundreds of characters in a few-second slot) can never be
+    spoken or fitted; accepting it poisons downstream timing for the whole
+    region.  Returns an error message so the chunk splits and retries smaller
+    instead of flowing through with a warning nobody can act on.
+    """
+    for position, cue in enumerate(cues, 1):
+        dense = len(re.sub(r"[\s\W]", "", cue["text"]))
+        seconds = max(0.001, (cue["end_ms"] - cue["start_ms"]) / 1000)
+        if dense > ABSURD_CUE_CHARS and dense / seconds > ABSURD_CUE_DENSITY:
+            return f"cue {position} ยาวผิดปกติ ({dense} ตัวอักษรใน {seconds:.1f} วินาที)"
+    return None
 
 
 def split_chunk(chunk: Chunk, source: list[dict]) -> tuple[Chunk, Chunk] | None:
@@ -693,6 +714,18 @@ def _translate_chunk(
                     message=last_error,
                 )
                 break
+            absurd = absurd_cue_error(cues)
+            if absurd is not None:
+                db.update_translation_chunk(chunk.id, status="failed", error=absurd)
+                db.record_attempt(
+                    job_id,
+                    "translation",
+                    "invalid",
+                    unit_id=chunk.id,
+                    model=model,
+                    message=absurd,
+                )
+                raise ChunkValidationError(absurd)
             return cues, warnings, model
         time.sleep(1)
     if saw_quota_exhausted:
